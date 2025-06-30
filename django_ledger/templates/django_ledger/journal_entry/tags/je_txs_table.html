@@ -27,9 +27,9 @@
                         <td>{% if transaction_model.fund_name %}
                           {{ transaction_model.fund_name }}{% endif %}</td>
                     {% endif %}
-                    <td>{% if transaction_model.is_credit %}$
+                    <td>{% if transaction_model.is_credit %}{% currency_symbol %}
                         {{ transaction_model.amount | currency_format }}{% endif %}</td>
-                    <td>{% if transaction_model.is_debit %}$
+                    <td>{% if transaction_model.is_debit %}{% currency_symbol %}
                         {{ transaction_model.amount | currency_format }}{% endif %}</td>
                     <td>{% if transaction_model.description %}{{ transaction_model.description }}{% endif %}</td>
                 </tr>
@@ -59,8 +59,8 @@
                 <tr>
                     <td>{{ transaction_model.account_code }}</td>
                     <td>{{ transaction_model.account_name }}</td>
-                    <td>{% if transaction_model.is_credit %}${{ transaction_model.amount | currency_format }}{% endif %}</td>
-                    <td>{% if transaction_model.is_debit %}${{ transaction_model.amount | currency_format }}{% endif %}</td>
+                    <td>{% if transaction_model.is_credit %}{% currency_symbol %}{{ transaction_model.amount | currency_format }}{% endif %}</td>
+                    <td>{% if transaction_model.is_debit %}{% currency_symbol %}{{ transaction_model.amount | currency_format }}{% endif %}</td>
                     <td>{% if transaction_model.description %}{{ transaction_model.description }}{% endif %}</td>
                 </tr>
             {% endfor %}
