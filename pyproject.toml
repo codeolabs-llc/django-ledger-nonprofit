@@ -1,15 +1,17 @@
 [project]
-name = "django-ledger"
-version = "0.7.8"
+name = "django-ledger-nonprofit"
+version = "0.7.8.0.1"
 readme = "README.md"
 requires-python = ">=3.10"
 description = "Double entry accounting system built on the Django Web Framework."
 keywords = ["django", "finance", "bookkeeping", "accounting", "balance sheet", "income statement", "general ledger", "money", "engine"]
 authors = [
-    { name = "Miguel Sanda", email = "msanda@arrobalytics.com" }
+    { name = "Miguel Sanda", email = "msanda@arrobalytics.com" },
+    { name = "John Har", email = "john@codeolabs.com" }
 ]
 maintainers = [
-    { name = "Miguel Sanda", email = "msanda@arrobalytics.com" }
+    { name = "Miguel Sanda", email = "msanda@arrobalytics.com" },
+    { name = "John Har", email = "john@codeolabs.com" }
 ]
 dependencies = [
     "asgiref>=3.5.2; python_version >= '3.7'",
