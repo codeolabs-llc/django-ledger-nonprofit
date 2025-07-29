@@ -6,7 +6,7 @@ Copyright© EDMA Group Inc licensed under the GPLv3 Agreement.
 default_app_config = 'django_ledger.apps.DjangoLedgerConfig'
 
 """Django Ledger"""
-__version__ = '0.7.6.1'
+__version__ = '0.7.8'
 __license__ = 'GPLv3 License'
 
 __author__ = 'Miguel Sanda'
