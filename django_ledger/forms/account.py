@@ -5,15 +5,24 @@ Copyright© EDMA Group Inc licensed under the GPLv3 Agreement.
 Contributions to this module:
     * Miguel Sanda <msanda@arrobalytics.com>
 """
+
 from random import randint
 from typing import Optional
 
-from django.forms import TextInput, Select, ModelForm, ChoiceField, ValidationError, CheckboxInput, HiddenInput
+from django.forms import (
+    TextInput,
+    Select,
+    ModelForm,
+    ChoiceField,
+    ValidationError,
+    CheckboxInput,
+    HiddenInput,
+)
 from django.utils.translation import gettext_lazy as _
 from treebeard.forms import MoveNodeForm
 
 from django_ledger.io import ACCOUNT_CHOICES_NO_ROOT
-from django_ledger.models import ChartOfAccountModel, EntityModel
+from django_ledger.models import ChartOfAccountModel
 from django_ledger.models.accounts import AccountModel
 from django_ledger.settings import DJANGO_LEDGER_FORM_INPUT_CLASSES
 
@@ -24,8 +33,6 @@ class AccountModelCreateForm(ModelForm):
 
     Attributes
     ----------
-    ENTITY_MODEL : Model
-        The entity model being used in the form.
     COA_MODEL : Model
         The Chart of Account Model being used in the form.
     """
@@ -64,25 +71,27 @@ class AccountModelCreateForm(ModelForm):
             'balance_type',
             'active',
             'active',
-            'coa_model'
+            'coa_model',
         ]
         widgets = {
-            'code': TextInput(attrs={
-                'class': DJANGO_LEDGER_FORM_INPUT_CLASSES,
-                'placeholder': _('Alpha Numeric (auto generated if not provided)...')
-            }),
-            'name': TextInput(attrs={
-                'class': DJANGO_LEDGER_FORM_INPUT_CLASSES,
-                'placeholder': _('Account Name...')
-            }),
-            'role': Select(attrs={
-                'class': DJANGO_LEDGER_FORM_INPUT_CLASSES
-            }),
+            'code': TextInput(
+                attrs={
+                    'class': DJANGO_LEDGER_FORM_INPUT_CLASSES,
+                    'placeholder': _(
+                        'Alpha Numeric (auto generated if not provided)...'
+                    ),
+                }
+            ),
+            'name': TextInput(
+                attrs={
+                    'class': DJANGO_LEDGER_FORM_INPUT_CLASSES,
+                    'placeholder': _('Account Name...'),
+                }
+            ),
+            'role': Select(attrs={'class': DJANGO_LEDGER_FORM_INPUT_CLASSES}),
             'role_default': CheckboxInput(),
-            'balance_type': Select(attrs={
-                'class': DJANGO_LEDGER_FORM_INPUT_CLASSES
-            }),
-            'coa_model': HiddenInput()
+            'balance_type': Select(attrs={'class': DJANGO_LEDGER_FORM_INPUT_CLASSES}),
+            'coa_model': HiddenInput(),
         }
 
 
@@ -90,7 +99,7 @@ class AccountModelUpdateForm(MoveNodeForm):
     """
     AccountModelUpdateForm
 
-    A form for updating account model, inheriting from MoveNodeForm.
+    A form for updating the account model, inheriting from MoveNodeForm.
 
     Attributes
     ----------
@@ -100,36 +109,32 @@ class AccountModelUpdateForm(MoveNodeForm):
         An optional choice field for selecting the relative node.
     """
 
-    _position = ChoiceField(required=True,
-                            label=_('Position'),
-                            widget=Select(attrs={
-                                'class': DJANGO_LEDGER_FORM_INPUT_CLASSES
-                            }))
-    _ref_node_id = ChoiceField(required=False,
-                               label=_('Relative to'),
-                               widget=Select(attrs={
-                                   'class': DJANGO_LEDGER_FORM_INPUT_CLASSES
-                               }))
-
+    _position = ChoiceField(
+        required=True,
+        label=_('Position'),
+        widget=Select(attrs={'class': DJANGO_LEDGER_FORM_INPUT_CLASSES}),
+    )
+    _ref_node_id = ChoiceField(
+        required=False,
+        label=_('Relative to'),
+        widget=Select(attrs={'class': DJANGO_LEDGER_FORM_INPUT_CLASSES}),
+    )
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.fields['role'].disabled = True
         self.fields['coa_model'].disabled = True
 
-
     @classmethod
     def mk_dropdown_tree(cls, model, for_node: Optional[AccountModel] = None):
-        """ Creates a tree-like list of choices """
+        """Creates a tree-like list of choices"""
 
         if not for_node:
             raise ValidationError(message='Must provide for_node argument.')
 
         qs = for_node.get_account_move_choice_queryset()
 
-        return [
-            (i.uuid, f'{"-" * (i.depth - 1)} {i}') for i in qs
-        ]
+        return [(i.uuid, f'{"-" * (i.depth - 1)} {i}') for i in qs]
 
     def clean_role(self):
         return self.instance.role
@@ -149,17 +154,9 @@ class AccountModelUpdateForm(MoveNodeForm):
         widgets = {
             'role': HiddenInput(),
             'coa_model': HiddenInput(),
-            'parent': Select(attrs={
-                'class': DJANGO_LEDGER_FORM_INPUT_CLASSES
-            }),
-            'balance_type': Select(attrs={
-                'class': DJANGO_LEDGER_FORM_INPUT_CLASSES
-            }),
-            'code': TextInput(attrs={
-                'class': DJANGO_LEDGER_FORM_INPUT_CLASSES
-            }),
-            'name': TextInput(attrs={
-                'class': DJANGO_LEDGER_FORM_INPUT_CLASSES
-            }),
+            'parent': Select(attrs={'class': DJANGO_LEDGER_FORM_INPUT_CLASSES}),
+            'balance_type': Select(attrs={'class': DJANGO_LEDGER_FORM_INPUT_CLASSES}),
+            'code': TextInput(attrs={'class': DJANGO_LEDGER_FORM_INPUT_CLASSES}),
+            'name': TextInput(attrs={'class': DJANGO_LEDGER_FORM_INPUT_CLASSES}),
             'role_default': CheckboxInput(),
         }

@@ -17,6 +17,7 @@ EntityModels may also have different financial reporting periods, (also known as
 specified at the time of creation. All key functionality around the Fiscal Year is encapsulated in the
 EntityReportMixIn.
 """
+
 from calendar import monthrange
 from collections import defaultdict
 from datetime import date, datetime, timedelta
@@ -24,37 +25,55 @@ from decimal import Decimal
 from itertools import zip_longest
 from random import choices
 from string import ascii_lowercase, digits
-from typing import Tuple, Union, Optional, List, Dict, Set
-from uuid import uuid4, UUID
+from typing import Dict, List, Optional, Set, Tuple, Union
+from uuid import UUID, uuid4
 
 from django.contrib.auth import get_user_model
 from django.core import serializers
 from django.core.cache import caches
-from django.core.exceptions import ValidationError, ObjectDoesNotExist
+from django.core.exceptions import ObjectDoesNotExist, ValidationError
 from django.core.validators import MinValueValidator
 from django.db import models
-from django.db.models import Q, F, Model
+from django.db.models import F, Model, Q
 from django.db.models.signals import pre_save
 from django.urls import reverse
 from django.utils.text import slugify
 from django.utils.translation import gettext_lazy as _
-from treebeard.mp_tree import MP_Node, MP_NodeManager, MP_NodeQuerySet
-
-from django_ledger.io import roles as roles_module, validate_roles, IODigestContextManager
-from django_ledger.io.io_core import IOMixIn, get_localtime, get_localdate
-from django_ledger.models.accounts import AccountModel, AccountModelQuerySet, DEBIT, CREDIT
-from django_ledger.models.bank_account import BankAccountModelQuerySet, BankAccountModel
-from django_ledger.models.chart_of_accounts import ChartOfAccountModel, ChartOfAccountModelQuerySet
+from django_ledger.io import IODigestContextManager, validate_roles
+from django_ledger.io import roles as roles_module
+from django_ledger.io.io_core import IOMixIn, get_localdate, get_localtime
+from django_ledger.models.accounts import (
+    CREDIT,
+    DEBIT,
+    AccountModel,
+    AccountModelQuerySet,
+)
+from django_ledger.models.bank_account import BankAccountModel, BankAccountModelQuerySet
+from django_ledger.models.chart_of_accounts import (
+    ChartOfAccountModel,
+    ChartOfAccountModelQuerySet,
+)
 from django_ledger.models.coa_default import CHART_OF_ACCOUNTS_ROOT_MAP
-from django_ledger.models.customer import CustomerModelQueryset, CustomerModel
-from django_ledger.models.items import (ItemModelQuerySet, ItemTransactionModelQuerySet,
-                                        UnitOfMeasureModel, UnitOfMeasureModelQuerySet, ItemModel)
+from django_ledger.models.customer import CustomerModel, CustomerModelQueryset
+from django_ledger.models.items import (
+    ItemModel,
+    ItemModelQuerySet,
+    ItemTransactionModelQuerySet,
+    UnitOfMeasureModel,
+    UnitOfMeasureModelQuerySet,
+)
 from django_ledger.models.ledger import LedgerModel
-from django_ledger.models.mixins import CreateUpdateMixIn, SlugNameMixIn, ContactInfoMixIn, LoggingMixIn
+from django_ledger.models.mixins import (
+    ContactInfoMixIn,
+    CreateUpdateMixIn,
+    LoggingMixIn,
+    SlugNameMixIn,
+)
 from django_ledger.models.unit import EntityUnitModel
 from django_ledger.models.utils import lazy_loader
-from django_ledger.models.vendor import VendorModelQuerySet, VendorModel
+from django_ledger.models.vendor import VendorModel, VendorModelQuerySet
 from django_ledger.settings import DJANGO_LEDGER_DEFAULT_CLOSING_ENTRY_CACHE_TIMEOUT
+from treebeard.mp_tree import MP_Node, MP_NodeManager, MP_NodeQuerySet
 
 UserModel = get_user_model()
 
@@ -71,7 +90,7 @@ class EntityModelQuerySet(MP_NodeQuerySet):
     Inherits from the Materialized Path Node QuerySet Class from Django Treebeard.
     """
 
-    def hidden(self):
+    def hidden(self) -> 'EntityModelQuerySet':
         """
         A QuerySet of all hidden EntityModel.
 
@@ -82,7 +101,7 @@ class EntityModelQuerySet(MP_NodeQuerySet):
         """
         return self.filter(hidden=True)
 
-    def visible(self):
+    def visible(self) -> 'EntityModelQuerySet':
         """
         A Queryset of all visible EntityModel.
 
@@ -108,15 +127,15 @@ class EntityModelManager(MP_NodeManager):
 
     """
 
-    def get_queryset(self):
+    def get_queryset(self) -> EntityModelQuerySet:
         """Sets the custom queryset as the default."""
-        qs = EntityModelQuerySet(
-            self.model,
-            using=self._db).order_by('path')
-        return qs.order_by('path').select_related(
-            'admin',
-            'default_coa').annotate(
-            _default_coa_slug=F('default_coa__slug'),
+        qs = EntityModelQuerySet(self.model, using=self._db).order_by('path')
+        return (
+            qs.order_by('path')
+            .select_related('admin', 'default_coa')
+            .annotate(
+                _default_coa_slug=F('default_coa__slug'),
+            )
         )
 
     def for_user(self, user_model, authorized_superuser: bool = False):
@@ -141,10 +160,7 @@ class EntityModelManager(MP_NodeManager):
         qs = self.get_queryset()
         if user_model.is_superuser and authorized_superuser:
             return qs
-        return qs.filter(
-            Q(admin=user_model) |
-            Q(managers__in=[user_model])
-        )
+        return qs.filter(Q(admin=user_model) | Q(managers__in=[user_model]))
 
 
 class EntityModelFiscalPeriodMixIn:
@@ -153,6 +169,7 @@ class EntityModelFiscalPeriodMixIn:
     EntityModel. At the moment of creation, an EntityModel must be assigned a calendar month which is going to
     determine the start of the Fiscal Year.
     """
+
     VALID_QUARTERS = list(range(1, 5))
     VALID_MONTHS = list(range(1, 13))
 
@@ -179,7 +196,7 @@ class EntityModelFiscalPeriodMixIn:
             # current object is not an entity, get current entity and fetch its fy_start_month value
 
             # if current object is a detail view with an object...
-            obj = getattr(self, 'object')
+            obj = getattr(self, 'object', None) or getattr(self, 'AUTHORIZED_ENTITY_MODEL')
             if isinstance(obj, EntityModel):
                 entity = obj
             elif isinstance(obj, LedgerModel):
@@ -436,25 +453,26 @@ class EntityModelClosingEntryMixIn:
                 )
         if closing_date and closing_entry_model.closing_date != closing_date:
             raise EntityModelValidationError(
-                message=_(f'The Closing Entry Model date {closing_entry_model.closing_date} '
-                          f'does not match explicitly provided closing_date {closing_date}')
+                message=_(
+                    f'The Closing Entry Model date {closing_entry_model.closing_date} '
+                    f'does not match explicitly provided closing_date {closing_date}'
+                )
             )
 
     # ---> Closing Entry IO Digest <---
-    def get_closing_entry_digest(self,
-                                 to_date: date,
-                                 from_date: Optional[date] = None,
-                                 user_model: Optional[UserModel] = None,
-                                 closing_entry_model=None,
-                                 **kwargs: Dict) -> Tuple:
+    def get_closing_entry_digest(
+        self,
+        to_date: date,
+        from_date: Optional[date] = None,
+        user_model: Optional[UserModel] = None,
+        closing_entry_model=None,
+        **kwargs: Dict,
+    ) -> Tuple:
         ClosingEntryModel = lazy_loader.get_closing_entry_model()
         ClosingEntryTransactionModel = lazy_loader.get_closing_entry_transaction_model()
 
         if not closing_entry_model:
-            closing_entry_model = ClosingEntryModel(
-                entity_model=self,
-                closing_date=to_date
-            )
+            closing_entry_model = ClosingEntryModel(entity_model=self, closing_date=to_date)
             closing_entry_model.clean()
         else:
             self.validate_closing_entry_model(closing_entry_model, closing_date=to_date)
@@ -466,7 +484,7 @@ class EntityModelClosingEntryMixIn:
             by_unit=True,
             by_activity=True,
             signs=False,
-            **kwargs
+            **kwargs,
         )
         ce_data = io_digest.get_closing_entry_data()
 
@@ -477,8 +495,9 @@ class EntityModelClosingEntryMixIn:
                 unit_model_id=ce['unit_uuid'],
                 tx_type=ce['balance_type'],
                 activity=ce['activity'],
-                balance=ce['balance']
-            ) for ce in ce_data
+                balance=ce['balance'],
+            )
+            for ce in ce_data
         ]
 
         for ce in ce_txs_list:
@@ -486,20 +505,10 @@ class EntityModelClosingEntryMixIn:
 
         return closing_entry_model, ce_txs_list
 
-    def get_closing_entry_digest_for_date(self,
-                                          closing_date: date,
-                                          closing_entry_model=None,
-                                          **kwargs) -> Tuple:
-        return self.get_closing_entry_digest(
-            to_date=closing_date,
-            closing_entry_model=closing_entry_model,
-            **kwargs
-        )
+    def get_closing_entry_digest_for_date(self, closing_date: date, closing_entry_model=None, **kwargs) -> Tuple:
+        return self.get_closing_entry_digest(to_date=closing_date, closing_entry_model=closing_entry_model, **kwargs)
 
-    def get_closing_entry_digest_for_month(self,
-                                           year: int,
-                                           month: int,
-                                           **kwargs: Dict) -> Tuple:
+    def get_closing_entry_digest_for_month(self, year: int, month: int, **kwargs: Dict) -> Tuple:
         _, day_end = monthrange(year, month)
         closing_date = date(year=year, month=month, day=day_end)
         return self.get_closing_entry_digest_for_date(closing_date=closing_date, **kwargs)
@@ -512,8 +521,8 @@ class EntityModelClosingEntryMixIn:
     def get_closing_entry_queryset_for_date(self, closing_date: date):
         ClosingEntryTransactionModel = lazy_loader.get_closing_entry_transaction_model()
         return ClosingEntryTransactionModel.objects.for_entity(
-            entity_slug=self,
-        ).filter(closing_entry_model__closing_date__exact=closing_date)
+            entity_model=self,
+        ).for_closing_date(closing_date)
 
     def get_closing_entry_queryset_for_month(self, year: int, month: int):
         _, end_day = monthrange(year, month)
@@ -525,11 +534,7 @@ class EntityModelClosingEntryMixIn:
         return self.get_closing_entry_queryset_for_date(closing_date=closing_date)
 
     # ----> Create Closing Entries <----
-    def create_closing_entry_for_date(self,
-                                      closing_date: date,
-                                      closing_entry_model=None,
-                                      closing_entry_exists=True):
-
+    def create_closing_entry_for_date(self, closing_date: date, closing_entry_model=None, closing_entry_exists=True):
         if closing_entry_model:
             self.validate_closing_entry_model(closing_entry_model, closing_date=closing_date)
 
@@ -538,24 +543,20 @@ class EntityModelClosingEntryMixIn:
                 message=_(f'Cannot create closing entry with a future date {closing_date}.')
             )
 
-        if closing_entry_model is None or closing_entry_exists:
+        if closing_entry_model is None:
             self.closingentrymodel_set.filter(closing_date__exact=closing_date).delete()
         else:
             closing_entry_model.closingentrytransactionmodel_set.all().delete()
 
         closing_entry_model, ce_txs_list = self.get_closing_entry_digest_for_date(
-            closing_date=closing_date,
-            closing_entry_model=closing_entry_model
+            closing_date=closing_date, closing_entry_model=closing_entry_model
         )
 
         if closing_entry_model is not None:
             closing_entry_model.save()
 
         ClosingEntryTransactionModel = lazy_loader.get_closing_entry_transaction_model()
-        return closing_entry_model, ClosingEntryTransactionModel.objects.bulk_create(
-            objs=ce_txs_list,
-            batch_size=100
-        )
+        return closing_entry_model, ClosingEntryTransactionModel.objects.bulk_create(objs=ce_txs_list, batch_size=100)
 
     def create_closing_entry_for_month(self, year: int, month: int):
         _, day = monthrange(year, month)
@@ -583,13 +584,14 @@ class EntityModelClosingEntryMixIn:
         return f'closing_entry_{end_dt_str}_{self.uuid}'
 
     # ----> Closing Entry Caching Month < -----
-    def get_closing_entry_cache_for_date(self,
-                                         closing_date: date,
-                                         cache_name: str = 'default',
-                                         force_cache_update: bool = False,
-                                         cache_timeout: Optional[int] = None,
-                                         **kwargs):
-
+    def get_closing_entry_cache_for_date(
+        self,
+        closing_date: date,
+        cache_name: str = 'default',
+        force_cache_update: bool = False,
+        cache_timeout: Optional[int] = None,
+        **kwargs,
+    ):
         if not force_cache_update:
             cache_system = caches[cache_name]
             ce_cache_key = self.get_closing_entry_cache_key_for_date(closing_date=closing_date)
@@ -605,16 +607,18 @@ class EntityModelClosingEntryMixIn:
             closing_date=closing_date,
             cache_name=cache_name,
             cache_timeout=cache_timeout,
-            **kwargs)
+            **kwargs,
+        )
 
-    def get_closing_entry_cache_for_month(self,
-                                          year: int,
-                                          month: int,
-                                          cache_name: str = 'default',
-                                          force_cache_update: bool = False,
-                                          cache_timeout: Optional[int] = None,
-                                          **kwargs):
-
+    def get_closing_entry_cache_for_month(
+        self,
+        year: int,
+        month: int,
+        cache_name: str = 'default',
+        force_cache_update: bool = False,
+        cache_timeout: Optional[int] = None,
+        **kwargs,
+    ):
         _, day = monthrange(year, month)
         closing_date = date(year, month, day)
         return self.get_closing_entry_cache_for_date(
@@ -622,30 +626,34 @@ class EntityModelClosingEntryMixIn:
             cache_name=cache_name,
             force_cache_update=force_cache_update,
             cache_timeout=cache_timeout,
-            **kwargs
+            **kwargs,
         )
 
-    def get_closing_entry_cache_for_fiscal_year(self,
-                                                fiscal_year: int,
-                                                cache_name: str = 'default',
-                                                force_cache_update: bool = False,
-                                                cache_timeout: Optional[int] = None,
-                                                **kwargs):
+    def get_closing_entry_cache_for_fiscal_year(
+        self,
+        fiscal_year: int,
+        cache_name: str = 'default',
+        force_cache_update: bool = False,
+        cache_timeout: Optional[int] = None,
+        **kwargs,
+    ):
         closing_date: date = getattr(self, 'get_fy_end')(year=fiscal_year)
         return self.get_closing_entry_cache_for_date(
             closing_date=closing_date,
             cache_name=cache_name,
             force_cache_update=force_cache_update,
             cache_timeout=cache_timeout,
-            **kwargs
+            **kwargs,
         )
 
     # ---> SAVE CLOSING ENTRY <---
-    def save_closing_entry_cache_for_date(self,
-                                          closing_date: date,
-                                          cache_name: str = 'default',
-                                          cache_timeout: Optional[int] = None,
-                                          **kwargs):
+    def save_closing_entry_cache_for_date(
+        self,
+        closing_date: date,
+        cache_name: str = 'default',
+        cache_timeout: Optional[int] = None,
+        **kwargs,
+    ):
         cache_system = caches[cache_name]
         ce_qs = self.get_closing_entry_queryset_for_date(closing_date=closing_date)
         ce_cache_key = self.get_closing_entry_cache_key_for_date(closing_date=closing_date)
@@ -657,43 +665,49 @@ class EntityModelClosingEntryMixIn:
         cache_system.set(ce_cache_key, ce_ser, cache_timeout, **kwargs)
         return list(ce_qs)
 
-    def save_closing_entry_cache_for_month(self,
-                                           year: int,
-                                           month: int,
-                                           cache_name: str = 'default',
-                                           cache_timeout: Optional[int] = None,
-                                           **kwargs):
+    def save_closing_entry_cache_for_month(
+        self,
+        year: int,
+        month: int,
+        cache_name: str = 'default',
+        cache_timeout: Optional[int] = None,
+        **kwargs,
+    ):
         _, day = monthrange(year, month)
         closing_date = date(year, month, day)
         return self.save_closing_entry_cache_for_date(
             closing_date=closing_date,
             cache_name=cache_name,
             cache_timeout=cache_timeout,
-            **kwargs
+            **kwargs,
         )
 
-    def save_closing_entry_cache_for_fiscal_year(self,
-                                                 fiscal_year: int,
-                                                 cache_name: str = 'default',
-                                                 cache_timeout: Optional[int] = None,
-                                                 **kwargs):
+    def save_closing_entry_cache_for_fiscal_year(
+        self,
+        fiscal_year: int,
+        cache_name: str = 'default',
+        cache_timeout: Optional[int] = None,
+        **kwargs,
+    ):
         closing_date: date = getattr(self, 'get_fy_end')(year=fiscal_year)
         return self.save_closing_entry_cache_for_date(
             closing_date=closing_date,
             cache_name=cache_name,
             cache_timeout=cache_timeout,
-            **kwargs
+            **kwargs,
         )
 
 
-class EntityModelAbstract(MP_Node,
-                          SlugNameMixIn,
-                          CreateUpdateMixIn,
-                          ContactInfoMixIn,
-                          IOMixIn,
-                          LoggingMixIn,
-                          EntityModelFiscalPeriodMixIn,
-                          EntityModelClosingEntryMixIn):
+class EntityModelAbstract(
+    MP_Node,
+    SlugNameMixIn,
+    CreateUpdateMixIn,
+    ContactInfoMixIn,
+    IOMixIn,
+    LoggingMixIn,
+    EntityModelFiscalPeriodMixIn,
+    EntityModelClosingEntryMixIn,
+):
     """
     The base implementation of the EntityModel. The EntityModel represents the Company, Corporation, Legal Entity,
     Enterprise or Person that engage and operate as a business. The base model inherit from the Materialized Path Node
@@ -765,19 +779,25 @@ class EntityModelAbstract(MP_Node,
 
     uuid = models.UUIDField(default=uuid4, editable=False, primary_key=True)
     name = models.CharField(max_length=150, verbose_name=_('Entity Name'))
-    default_coa = models.OneToOneField('django_ledger.ChartOfAccountModel',
-                                       verbose_name=_('Default Chart of Accounts'),
-                                       blank=True,
-                                       null=True,
-                                       on_delete=models.PROTECT)
-    admin = models.ForeignKey(UserModel,
-                              on_delete=models.CASCADE,
-                              related_name='admin_of',
-                              verbose_name=_('Admin'))
-    managers = models.ManyToManyField(UserModel,
-                                      through='EntityManagementModel',
-                                      related_name='managed_by',
-                                      verbose_name=_('Managers'))
+    default_coa = models.OneToOneField(
+        'django_ledger.ChartOfAccountModel',
+        verbose_name=_('Default Chart of Accounts'),
+        blank=True,
+        null=True,
+        on_delete=models.PROTECT,
+    )
+    admin = models.ForeignKey(
+        UserModel,
+        on_delete=models.CASCADE,
+        related_name='admin_of',
+        verbose_name=_('Admin'),
+    )
+    managers = models.ManyToManyField(
+        UserModel,
+        through='EntityManagementModel',
+        related_name='managed_by',
+        verbose_name=_('Managers'),
+    )
 
     hidden = models.BooleanField(default=False)
     accrual_method = models.BooleanField(default=False, verbose_name=_('Use Accrual Method'))
@@ -787,16 +807,12 @@ class EntityModelAbstract(MP_Node,
     meta = models.JSONField(default=dict, null=True, blank=True)
     objects = EntityModelManager.from_queryset(queryset_class=EntityModelQuerySet)()
 
-    node_order_by = ['uuid']
-
     class Meta:
         abstract = True
         ordering = ['-created']
         verbose_name = _('Entity')
         verbose_name_plural = _('Entities')
-        indexes = [
-            models.Index(fields=['admin'])
-        ]
+        indexes = [models.Index(fields=['admin'])]
 
     def __str__(self):
         return f'EntityModel {self.slug}: {self.name}'
@@ -818,12 +834,14 @@ class EntityModelAbstract(MP_Node,
 
     # ## ENTITY CREATION ###
     @classmethod
-    def create_entity(cls,
-                      name: str,
-                      use_accrual_method: bool,
-                      admin: UserModel,
-                      fy_start_month: int,
-                      parent_entity=None):
+    def create_entity(
+        cls,
+        name: str,
+        use_accrual_method: bool,
+        admin: UserModel,
+        fy_start_month: int,
+        parent_entity=None,
+    ):
         """
         Convenience Method to Create a new Entity Model. This is the preferred method to create new Entities in order
         to properly handle potential parent/child relationships between EntityModels.
@@ -850,7 +868,7 @@ class EntityModelAbstract(MP_Node,
             name=name,
             accrual_method=use_accrual_method,
             fy_start_month=fy_start_month,
-            admin=admin
+            admin=admin,
         )
         entity_model.clean()
         entity_model = cls.add_root(instance=entity_model)
@@ -863,7 +881,8 @@ class EntityModelAbstract(MP_Node,
                     raise EntityModelValidationError(
                         message=_(
                             f'Invalid Parent Entity. '
-                            f'Entity with slug {parent_entity} is not administered by {admin.username}')
+                            f'Entity with slug {parent_entity} is not administered by {admin.username}'
+                        )
                     )
             elif isinstance(parent_entity, UUID):
                 # get by uuid...
@@ -873,21 +892,20 @@ class EntityModelAbstract(MP_Node,
                     raise EntityModelValidationError(
                         message=_(
                             f'Invalid Parent Entity. '
-                            f'Entity with UUID {parent_entity} is not administered by {admin.username}')
+                            f'Entity with UUID {parent_entity} is not administered by {admin.username}'
+                        )
                     )
             elif isinstance(parent_entity, cls):
                 # EntityModel instance provided...
                 if parent_entity.admin != admin:
                     raise EntityModelValidationError(
                         message=_(
-                            f'Invalid Parent Entity. '
-                            f'Entity {parent_entity} is not administered by {admin.username}')
+                            f'Invalid Parent Entity. Entity {parent_entity} is not administered by {admin.username}'
+                        )
                     )
                 parent_entity_model = parent_entity
             else:
-                raise EntityModelValidationError(
-                    _('Only slug, UUID or EntityModel allowed.')
-                )
+                raise EntityModelValidationError(_('Only slug, UUID or EntityModel allowed.'))
 
             parent_entity.add_child(instance=entity_model)
         return entity_model
@@ -908,15 +926,16 @@ class EntityModelAbstract(MP_Node,
         return user_model.id == self.admin_id
 
     # #### LEDGER MANAGEMENT....
-    def create_ledger(self, name: str, ledger_xid: Optional[str] = None, posted: bool = False, commit: bool = True):
+    def create_ledger(
+        self,
+        name: str,
+        ledger_xid: Optional[str] = None,
+        posted: bool = False,
+        commit: bool = True,
+    ):
         if commit:
             return self.ledgermodel_set.create(name=name, ledger_xid=ledger_xid, posted=posted)
-        return LedgerModel(
-            entity=self,
-            posted=posted,
-            name=name,
-            ledger_xid=ledger_xid
-        )
+        return LedgerModel(entity=self, posted=posted, name=name, ledger_xid=ledger_xid)
 
     # #### SLUG GENERATION ###
     @staticmethod
@@ -938,10 +957,12 @@ class EntityModelAbstract(MP_Node,
         entity_slug = f'{slug}-{suffix}'
         return entity_slug
 
-    def generate_slug(self,
-                      commit: bool = False,
-                      raise_exception: bool = True,
-                      force_update: bool = False) -> str:
+    def generate_slug(
+        self,
+        commit: bool = False,
+        raise_exception: bool = True,
+        force_update: bool = False,
+    ) -> str:
         """
         Convenience method to create the EntityModel slug.
 
@@ -965,10 +986,7 @@ class EntityModelAbstract(MP_Node,
         self.slug = self.generate_slug_from_name(self.name)
 
         if commit:
-            self.save(update_fields=[
-                'slug',
-                'updated'
-            ])
+            self.save(update_fields=['slug', 'updated'])
         return self.slug
 
     # #### CHART OF ACCOUNTS ####
@@ -1004,7 +1022,6 @@ class EntityModelAbstract(MP_Node,
         return self.default_coa
 
     def set_default_coa(self, coa_model: Optional[Union[ChartOfAccountModel, str]], commit: bool = False):
-
         # if str, will look up CoA Model by slug...
         if isinstance(coa_model, str):
             coa_model = self.chartofaccountmodel_set.get(slug=coa_model)
@@ -1013,15 +1030,14 @@ class EntityModelAbstract(MP_Node,
 
         self.default_coa = coa_model
         if commit:
-            self.save(update_fields=[
-                'default_coa',
-                'updated'
-            ])
+            self.save(update_fields=['default_coa', 'updated'])
 
-    def create_chart_of_accounts(self,
-                                 assign_as_default: bool = False,
-                                 coa_name: Optional[str] = None,
-                                 commit: bool = False) -> ChartOfAccountModel:
+    def create_chart_of_accounts(
+        self,
+        assign_as_default: bool = False,
+        coa_name: Optional[str] = None,
+        commit: bool = False,
+    ) -> ChartOfAccountModel:
         """
         Creates a Chart of Accounts for the Entity Model and optionally assign it as the default Chart of Accounts.
         EntityModel must have a default Chart of Accounts before being able to transact.
@@ -1046,10 +1062,7 @@ class EntityModelAbstract(MP_Node,
         if not coa_name:
             coa_name = 'Default CoA'
 
-        chart_of_accounts = ChartOfAccountModel(
-            name=coa_name,
-            entity=self
-        )
+        chart_of_accounts = ChartOfAccountModel(name=coa_name, entity=self)
 
         chart_of_accounts.clean()
         chart_of_accounts.save()
@@ -1058,18 +1071,17 @@ class EntityModelAbstract(MP_Node,
         if assign_as_default:
             self.default_coa = chart_of_accounts
             if commit:
-                self.save(update_fields=[
-                    'default_coa',
-                    'updated'
-                ])
+                self.save(update_fields=['default_coa', 'updated'])
         return chart_of_accounts
 
-    def populate_default_coa(self,
-                             activate_accounts: bool = False,
-                             force: bool = False,
-                             ignore_if_default_coa: bool = True,
-                             coa_model: Optional[ChartOfAccountModel] = None,
-                             commit: bool = True):
+    def populate_default_coa(
+        self,
+        activate_accounts: bool = False,
+        force: bool = False,
+        ignore_if_default_coa: bool = True,
+        coa_model: Optional[ChartOfAccountModel] = None,
+        commit: bool = True,
+    ):
         """
         Populates the EntityModel default CoA with the default Chart of Account list provided by Django Ledger or user
         defined. See DJANGO_LEDGER_DEFAULT_COA setting.
@@ -1114,7 +1126,10 @@ class EntityModelAbstract(MP_Node,
                         balance_type=a['balance_type'],
                         active=activate_accounts,
                         coa_model=coa_model,
-                    ) for a in v] for k, v in CHART_OF_ACCOUNTS_ROOT_MAP.items()
+                    )
+                    for a in v
+                ]
+                for k, v in CHART_OF_ACCOUNTS_ROOT_MAP.items()
             }
 
             for root_acc, acc_model_list in root_maps.items():
@@ -1133,8 +1148,7 @@ class EntityModelAbstract(MP_Node,
         else:
             if not ignore_if_default_coa:
                 raise EntityModelValidationError(
-                    f'Entity {self.name} already has existing accounts. '
-                    'Use force=True to bypass this check'
+                    f'Entity {self.name} already has existing accounts. Use force=True to bypass this check'
                 )
 
     def get_coa_model_qs(self, active: bool = True):
@@ -1157,9 +1171,9 @@ class EntityModelAbstract(MP_Node,
         return coa_model_qs
 
     # Model Validators....
-    def validate_chart_of_accounts_for_entity(self,
-                                              coa_model: ChartOfAccountModel,
-                                              raise_exception: bool = True) -> bool:
+    def validate_chart_of_accounts_for_entity(
+        self, coa_model: ChartOfAccountModel, raise_exception: bool = True
+    ) -> bool:
         """
         Validates the CoA Model against the EntityModel instance.
 
@@ -1179,13 +1193,16 @@ class EntityModelAbstract(MP_Node,
             return True
         if raise_exception:
             raise EntityModelValidationError(
-                f'Invalid ChartOfAccounts model {coa_model.slug} for EntityModel {self.slug}')
+                f'Invalid ChartOfAccounts model {coa_model.slug} for EntityModel {self.slug}'
+            )
         return False
 
-    def validate_account_model_for_coa(self,
-                                       account_model: AccountModel,
-                                       coa_model: ChartOfAccountModel,
-                                       raise_exception: bool = True) -> bool:
+    def validate_account_model_for_coa(
+        self,
+        account_model: AccountModel,
+        coa_model: ChartOfAccountModel,
+        raise_exception: bool = True,
+    ) -> bool:
         """
         Validates that the AccountModel provided belongs to the CoA Model provided.
 
@@ -1223,11 +1240,9 @@ class EntityModelAbstract(MP_Node,
         if ledger_model.entity_id != self.uuid:
             raise EntityModelValidationError(f'Invalid LedgerModel {ledger_model.uuid} for entity {self.slug}')
 
-    def get_all_coa_accounts(self,
-                             order_by: Optional[Tuple[str]] = ('code',),
-                             active: bool = True) -> Tuple[
-        ChartOfAccountModelQuerySet, Dict[ChartOfAccountModel, AccountModelQuerySet]]:
-
+    def get_all_coa_accounts(
+        self, order_by: Optional[Tuple[str]] = ('code',), active: bool = True
+    ) -> Tuple[ChartOfAccountModelQuerySet, Dict[ChartOfAccountModel, AccountModelQuerySet]]:
         """
         Fetches all the AccountModels associated with the EntityModel grouped by ChartOfAccountModel.
 
@@ -1244,13 +1259,15 @@ class EntityModelAbstract(MP_Node,
             The ChartOfAccountModelQuerySet and a grouping of AccountModels by ChartOfAccountModel as keys.
         """
 
-        account_model_qs = ChartOfAccountModel.objects.filter(
-            entity_id=self.uuid
-        ).select_related('entity').prefetch_related('accountmodel_set')
+        account_model_qs = (
+            ChartOfAccountModel.objects.filter(entity_id=self.uuid)
+            .select_related('entity')
+            .prefetch_related('accountmodel_set')
+        )
 
         return account_model_qs, {
-            coa_model: coa_model.accountmodel_set.filter(active=active).order_by(*order_by) for coa_model in
-            account_model_qs
+            coa_model: coa_model.accountmodel_set.filter(active=active).order_by(*order_by)
+            for coa_model in account_model_qs
         }
 
     # ##### ACCOUNT MANAGEMENT ######
@@ -1270,9 +1287,9 @@ class EntityModelAbstract(MP_Node,
             The AccountModelQuerySet of the assigned default CoA.
         """
 
-        account_model_qs = AccountModel.objects.filter(
-            coa_model__entity__uuid__exact=self.uuid
-        ).select_related('coa_model', 'coa_model__entity')
+        account_model_qs = AccountModel.objects.filter(coa_model__entity__uuid__exact=self.uuid).select_related(
+            'coa_model', 'coa_model__entity'
+        )
 
         if active:
             account_model_qs = account_model_qs.active()
@@ -1280,13 +1297,14 @@ class EntityModelAbstract(MP_Node,
             account_model_qs = account_model_qs.order_by(*order_by)
         return account_model_qs
 
-    def get_coa_accounts(self,
-                         coa_model: Optional[Union[ChartOfAccountModel, UUID, str]] = None,
-                         active: bool = True,
-                         locked: bool = False,
-                         order_by: Optional[Tuple] = ('code',),
-                         return_coa_model: bool = False,
-                         ) -> Union[AccountModelQuerySet, Tuple[ChartOfAccountModel, AccountModelQuerySet]]:
+    def get_coa_accounts(
+        self,
+        coa_model: Optional[Union[ChartOfAccountModel, UUID, str]] = None,
+        active: bool = True,
+        locked: bool = False,
+        order_by: Optional[Tuple] = ('code',),
+        return_coa_model: bool = False,
+    ) -> Union[AccountModelQuerySet, Tuple[ChartOfAccountModel, AccountModelQuerySet]]:
         """
         Fetches the AccountModelQuerySet for a specific ChartOfAccountModel.
 
@@ -1335,10 +1353,12 @@ class EntityModelAbstract(MP_Node,
             return coa_model, account_model_qs
         return account_model_qs
 
-    def get_default_coa_accounts(self,
-                                 active: bool = True,
-                                 order_by: Optional[Tuple[str]] = ('code',),
-                                 raise_exception: bool = True) -> Optional[AccountModelQuerySet]:
+    def get_default_coa_accounts(
+        self,
+        active: bool = True,
+        order_by: Optional[Tuple[str]] = ('code',),
+        raise_exception: bool = True,
+    ) -> Optional[AccountModelQuerySet]:
         """
         Fetches the default AccountModelQuerySet.
 
@@ -1363,10 +1383,11 @@ class EntityModelAbstract(MP_Node,
 
         return self.get_coa_accounts(active=active, order_by=order_by)
 
-    def get_accounts_with_codes(self,
-                                code_list: Union[str, List[str], Set[str]],
-                                coa_model: Optional[Union[ChartOfAccountModel, UUID, str]] = None
-                                ) -> AccountModelQuerySet:
+    def get_accounts_with_codes(
+        self,
+        code_list: Union[str, List[str], Set[str]],
+        coa_model: Optional[Union[ChartOfAccountModel, UUID, str]] = None,
+    ) -> AccountModelQuerySet:
         """
         Fetches the AccountModelQuerySet with provided code list.
 
@@ -1393,9 +1414,7 @@ class EntityModelAbstract(MP_Node,
             return account_model_qs.filter(code__exact=code_list)
         return account_model_qs.filter(code__in=code_list)
 
-    def get_default_account_for_role(self,
-                                     role: str,
-                                     coa_model: Optional[ChartOfAccountModel] = None) -> AccountModel:
+    def get_default_account_for_role(self, role: str, coa_model: Optional[ChartOfAccountModel] = None) -> AccountModel:
         """
         Gets the given role default AccountModel from the provided CoA.
         CoA will be validated against the EntityModel instance.
@@ -1421,14 +1440,18 @@ class EntityModelAbstract(MP_Node,
         account_model_qs = coa_model.accountmodel_set.all().is_role_default()
         return account_model_qs.get(role__exact=role)
 
-    def create_account(self,
-                       code: str,
-                       role: str,
-                       name: str,
-                       balance_type: str,
-                       active: bool = False,
-                       coa_model: Optional[Union[ChartOfAccountModel, UUID, str]] = None,
-                       raise_exception: bool = True) -> AccountModel:
+    def create_account(
+        self,
+        code: str,
+        role: str,
+        name: str,
+        balance_type: str,
+        active: bool = False,
+        coa_model: Optional[Union[ChartOfAccountModel, UUID, str]] = None,
+        raise_exception: bool = True,
+        is_role_default: bool = False,
+        force_role_default: bool = False,
+    ) -> AccountModel:
         """
         Creates a new AccountModel for the EntityModel.
 
@@ -1449,6 +1472,11 @@ class EntityModelAbstract(MP_Node,
             provided.
         raise_exception: bool
             Raises EntityModelValidationError if ChartOfAccountsModel is not valid for the EntityModel instance.
+        is_role_default: bool
+            Set the new account model as default for a specified role.
+        force_role_default: bool
+            Forces the new account model to be set as default for a specified role. Any pre-existing default account
+            will be removed as default for the specified role.
 
         Returns
         -------
@@ -1461,10 +1489,7 @@ class EntityModelAbstract(MP_Node,
             elif isinstance(coa_model, str):
                 coa_model = self.chartofaccountsmodel_set.get(slug__exact=coa_model)
             elif isinstance(coa_model, ChartOfAccountModel):
-                self.validate_chart_of_accounts_for_entity(
-                    coa_model=coa_model,
-                    raise_exception=raise_exception
-                )
+                self.validate_chart_of_accounts_for_entity(coa_model=coa_model, raise_exception=raise_exception)
         else:
             coa_model = self.default_coa
 
@@ -1473,13 +1498,17 @@ class EntityModelAbstract(MP_Node,
             role=role,
             name=name,
             balance_type=balance_type,
-            active=active
+            active=active,
+            is_role_default=is_role_default,
+            force_role_default=force_role_default,
         )
 
-    def create_account_by_kwargs(self,
-                                 account_model_kwargs: Dict,
-                                 coa_model: Optional[Union[ChartOfAccountModel, UUID, str]] = None,
-                                 raise_exception: bool = True) -> Tuple[ChartOfAccountModel, AccountModel]:
+    def create_account_by_kwargs(
+        self,
+        account_model_kwargs: Dict,
+        coa_model: Optional[Union[ChartOfAccountModel, UUID, str]] = None,
+        raise_exception: bool = True,
+    ) -> Tuple[ChartOfAccountModel, AccountModel]:
         """
         Creates a new AccountModel for the EntityModel by passing AccountModel KWARGS.
         This is a legacy method for creating a new AccountModel for the EntityModel.
@@ -1506,10 +1535,7 @@ class EntityModelAbstract(MP_Node,
             elif isinstance(coa_model, str):
                 coa_model = self.chartofaccountsmodel_set.get(slug__exact=coa_model)
             elif isinstance(coa_model, ChartOfAccountModel):
-                self.validate_chart_of_accounts_for_entity(
-                    coa_model=coa_model,
-                    raise_exception=raise_exception
-                )
+                self.validate_chart_of_accounts_for_entity(coa_model=coa_model, raise_exception=raise_exception)
         else:
             coa_model = self.default_coa
 
@@ -1517,17 +1543,8 @@ class EntityModelAbstract(MP_Node,
         # account_model.clean()
         return coa_model, coa_model.create_account(**account_model_kwargs)
 
-    def get_account_balance(self,
-                            account_codes: List[str],
-                            to_date: Union[datetime, date, str],
-                            **kwargs):
-
-        io_context = self.digest(
-            entity_model=self.slug,
-            accounts=account_codes,
-            to_date=to_date,
-            **kwargs
-        )
+    def get_account_balance(self, account_codes: List[str], to_date: Union[datetime, date, str], **kwargs):
+        io_context = self.digest(entity_model=self.slug, accounts=account_codes, to_date=to_date, **kwargs)
 
         return io_context
 
@@ -1539,7 +1556,6 @@ class EntityModelAbstract(MP_Node,
 
     # ### JOURNAL ENTRY MANAGEMENT ####
     def get_journal_entries(self, ledger_model: LedgerModel, posted: bool = True):
-
         if ledger_model:
             self.validate_ledger_model_for_entity(ledger_model)
             qs = ledger_model.journal_entries.all()
@@ -1548,7 +1564,7 @@ class EntityModelAbstract(MP_Node,
             return qs
 
         JournalEntryModel = lazy_loader.get_journal_entry_model()
-        qs = JournalEntryModel.objects.for_entity(entity_slug=self)
+        qs = JournalEntryModel.objects.for_entity(entity_model=self)
         if posted:
             return qs.posted()
         return qs
@@ -1655,6 +1671,11 @@ class EntityModelAbstract(MP_Node,
             customer_model.save()
         return customer_model
 
+    # ### RECEIPT MANAGEMENT ####
+    def get_receipts(self):
+        ReceiptModel = lazy_loader.get_receipt_model()
+        return ReceiptModel.objects.for_entity(entity_model=self)
+
     # ### BILL MANAGEMENT ####
     def get_bills(self):
         """
@@ -1665,22 +1686,24 @@ class EntityModelAbstract(MP_Node,
         BillModelQuerySet
         """
         BillModel = lazy_loader.get_bill_model()
-        return BillModel.objects.filter(
-            ledger__entity__uuid__exact=self.uuid
-        ).select_related('ledger', 'ledger__entity', 'vendor')
+        return BillModel.objects.filter(ledger__entity__uuid__exact=self.uuid).select_related(
+            'ledger', 'ledger__entity', 'vendor'
+        )
 
-    def create_bill(self,
-                    vendor_model: Union[VendorModel, UUID, str],
-                    terms: str,
-                    date_draft: Optional[Union[date, datetime]] = None,
-                    xref: Optional[str] = None,
-                    cash_account: Optional[AccountModel] = None,
-                    prepaid_account: Optional[AccountModel] = None,
-                    payable_account: Optional[AccountModel] = None,
-                    additional_info: Optional[Dict] = None,
-                    ledger_name: Optional[str] = None,
-                    coa_model: Optional[Union[ChartOfAccountModel, UUID, str]] = None,
-                    commit: bool = True):
+    def create_bill(
+        self,
+        vendor_model: Union[VendorModel, UUID, str],
+        terms: str,
+        date_draft: Optional[Union[date, datetime]] = None,
+        xref: Optional[str] = None,
+        cash_account: Optional[AccountModel] = None,
+        prepaid_account: Optional[AccountModel] = None,
+        payable_account: Optional[AccountModel] = None,
+        additional_info: Optional[Dict] = None,
+        ledger_name: Optional[str] = None,
+        coa_model: Optional[Union[ChartOfAccountModel, UUID, str]] = None,
+        commit: bool = True,
+    ):
         """
         Creates a new BillModel for the EntityModel instance.
         Bill will have DRAFT status.
@@ -1735,8 +1758,9 @@ class EntityModelAbstract(MP_Node,
             roles=[
                 roles_module.ASSET_CA_CASH,
                 roles_module.ASSET_CA_PREPAID,
-                roles_module.LIABILITY_CL_ACC_PAYABLE
-            ]).is_role_default()
+                roles_module.LIABILITY_CL_ACC_PAYABLE,
+            ]
+        ).is_role_default()
 
         # evaluates the queryset...
         len(account_model_qs)
@@ -1747,19 +1771,21 @@ class EntityModelAbstract(MP_Node,
             terms=terms,
             additional_info=additional_info,
             cash_account=account_model_qs.get(role=roles_module.ASSET_CA_CASH) if not cash_account else cash_account,
-            prepaid_account=account_model_qs.get(
-                role=roles_module.ASSET_CA_PREPAID
-            ) if not prepaid_account else prepaid_account,
-            unearned_account=account_model_qs.get(
-                role=roles_module.LIABILITY_CL_ACC_PAYABLE
-            ) if not payable_account else payable_account
+            prepaid_account=account_model_qs.get(role=roles_module.ASSET_CA_PREPAID)
+            if not prepaid_account
+            else prepaid_account,
+            unearned_account=account_model_qs.get(role=roles_module.LIABILITY_CL_ACC_PAYABLE)
+            if not payable_account
+            else payable_account,
         )
 
-        _, bill_model = bill_model.configure(entity_slug=self,
-                                             ledger_name=ledger_name,
-                                             date_draft=date_draft,
-                                             commit=commit,
-                                             commit_ledger=commit)
+        _, bill_model = bill_model.configure(
+            entity_slug=self,
+            ledger_name=ledger_name,
+            date_draft=date_draft,
+            commit=commit,
+            commit_ledger=commit,
+        )
 
         return bill_model
 
@@ -1777,22 +1803,23 @@ class EntityModelAbstract(MP_Node,
         InvoiceModelQuerySet
         """
         InvoiceModel = lazy_loader.get_invoice_model()
-        return InvoiceModel.objects.filter(
-            ledger__entity__uuid__exact=self.uuid
-        ).select_related('ledger', 'ledger__entity', 'customer')
+        return InvoiceModel.objects.filter(ledger__entity__uuid__exact=self.uuid).select_related(
+            'ledger', 'ledger__entity', 'customer'
+        )
 
-    def create_invoice(self,
-                       customer_model: Union[VendorModel, UUID, str],
-                       terms: str,
-                       cash_account: Optional[AccountModel] = None,
-                       prepaid_account: Optional[AccountModel] = None,
-                       payable_account: Optional[AccountModel] = None,
-                       additional_info: Optional[Dict] = None,
-                       ledger_name: Optional[str] = None,
-                       coa_model: Optional[Union[ChartOfAccountModel, UUID, str]] = None,
-                       date_draft: Optional[date] = None,
-                       commit: bool = True):
-
+    def create_invoice(
+        self,
+        customer_model: Union[CustomerModel, UUID, str],
+        terms: str,
+        cash_account: Optional[AccountModel] = None,
+        prepaid_account: Optional[AccountModel] = None,
+        payable_account: Optional[AccountModel] = None,
+        additional_info: Optional[Dict] = None,
+        ledger_name: Optional[str] = None,
+        coa_model: Optional[Union[ChartOfAccountModel, UUID, str]] = None,
+        date_draft: Optional[date] = None,
+        commit: bool = True,
+    ):
         """
         Creates a new InvoiceModel for the EntityModel instance.
         Invoice will have DRAFT status.
@@ -1832,7 +1859,8 @@ class EntityModelAbstract(MP_Node,
         if isinstance(customer_model, CustomerModel):
             if not customer_model.entity_model_id == self.uuid:
                 raise EntityModelValidationError(
-                    f'CustomerModel {customer_model.uuid} belongs to a different EntityModel.')
+                    f'CustomerModel {customer_model.uuid} belongs to a different EntityModel.'
+                )
         elif isinstance(customer_model, UUID):
             customer_model = self.get_customer_by_uuid(customer_uuid=customer_model)
         elif isinstance(customer_model, str):
@@ -1845,30 +1873,30 @@ class EntityModelAbstract(MP_Node,
             roles=[
                 roles_module.ASSET_CA_CASH,
                 roles_module.ASSET_CA_RECEIVABLES,
-                roles_module.LIABILITY_CL_DEFERRED_REVENUE
-            ]).is_role_default()
-
-        # evaluates the queryset...
-        len(account_model_qs)
+                roles_module.LIABILITY_CL_DEFERRED_REVENUE,
+            ]
+        ).is_role_default()
 
         invoice_model = InvoiceModel(
             customer=customer_model,
             additional_info=additional_info,
             terms=terms,
             cash_account=account_model_qs.get(role=roles_module.ASSET_CA_CASH) if not cash_account else cash_account,
-            prepaid_account=account_model_qs.get(
-                role=roles_module.ASSET_CA_RECEIVABLES
-            ) if not prepaid_account else prepaid_account,
-            unearned_account=account_model_qs.get(
-                role=roles_module.LIABILITY_CL_DEFERRED_REVENUE
-            ) if not payable_account else payable_account
+            prepaid_account=account_model_qs.get(role=roles_module.ASSET_CA_RECEIVABLES)
+            if not prepaid_account
+            else prepaid_account,
+            unearned_account=account_model_qs.get(role=roles_module.LIABILITY_CL_DEFERRED_REVENUE)
+            if not payable_account
+            else payable_account,
         )
 
-        _, invoice_model = invoice_model.configure(entity_slug=self,
-                                                   ledger_name=ledger_name,
-                                                   commit=commit,
-                                                   date_draft=date_draft,
-                                                   commit_ledger=commit)
+        _, invoice_model = invoice_model.configure(
+            entity_slug=self,
+            ledger_name=ledger_name,
+            commit=commit,
+            date_draft=date_draft,
+            commit_ledger=commit,
+        )
 
         return invoice_model
 
@@ -1883,11 +1911,13 @@ class EntityModelAbstract(MP_Node,
         """
         return self.purchaseordermodel_set.all().select_related('entity')
 
-    def create_purchase_order(self,
-                              po_title: Optional[str] = None,
-                              estimate_model=None,
-                              date_draft: Optional[date] = None,
-                              commit: bool = True):
+    def create_purchase_order(
+        self,
+        po_title: Optional[str] = None,
+        estimate_model=None,
+        date_draft: Optional[date] = None,
+        commit: bool = True,
+    ):
         """
         Creates a new PurchaseOrderModel for the EntityModel instance.
         PO will have DRAFT status.
@@ -1915,7 +1945,7 @@ class EntityModelAbstract(MP_Node,
             draft_date=date_draft,
             estimate_model=estimate_model,
             commit=commit,
-            po_title=po_title
+            po_title=po_title,
         )
 
     # ### ESTIMATE/CONTRACT MANAGEMENT ####
@@ -1929,12 +1959,14 @@ class EntityModelAbstract(MP_Node,
         """
         return self.estimatemodel_set.all().select_related('entity')
 
-    def create_estimate(self,
-                        estimate_title: str,
-                        contract_terms: str,
-                        customer_model: Union[CustomerModel, UUID, str],
-                        date_draft: Optional[date] = None,
-                        commit: bool = True):
+    def create_estimate(
+        self,
+        estimate_title: str,
+        contract_terms: str,
+        customer_model: Union[CustomerModel, UUID, str],
+        date_draft: Optional[date] = None,
+        commit: bool = True,
+    ):
         """
         Creates a new EstimateModel for the EntityModel instance.
         Estimate will have DRAFT status.
@@ -1973,7 +2005,7 @@ class EntityModelAbstract(MP_Node,
             date_draft=date_draft,
             customer_model=customer_model,
             estimate_title=estimate_title,
-            commit=commit
+            commit=commit,
         )
 
     # ### BANK ACCOUNT MANAGEMENT ####
@@ -1995,15 +2027,16 @@ class EntityModelAbstract(MP_Node,
             bank_account_qs = bank_account_qs.active()
         return bank_account_qs
 
-    def create_bank_account(self,
-                            name: str,
-                            account_type: str,
-                            active=False,
-                            account_model: Optional[AccountModel] = None,
-                            coa_model: Optional[Union[ChartOfAccountModel, UUID, str]] = None,
-                            bank_account_model_kwargs: Optional[Dict] = None,
-                            commit: bool = True):
-
+    def create_bank_account(
+        self,
+        name: str,
+        account_type: str,
+        active=False,
+        account_model: Optional[AccountModel] = None,
+        coa_model: Optional[Union[ChartOfAccountModel, UUID, str]] = None,
+        bank_account_model_kwargs: Optional[Dict] = None,
+        commit: bool = True,
+    ):
         """
         Create a bank account entry for the entity model with specified attributes and validation.
 
@@ -2043,13 +2076,12 @@ class EntityModelAbstract(MP_Node,
 
         if account_type not in BankAccountModel.VALID_ACCOUNT_TYPES:
             raise EntityModelValidationError(
-                _(f'Invalid Account Type: choices are {BankAccountModel.VALID_ACCOUNT_TYPES}'))
+                _(f'Invalid Account Type: choices are {BankAccountModel.VALID_ACCOUNT_TYPES}')
+            )
 
         account_model_qs = self.get_coa_accounts(coa_model=coa_model, active=True)
         account_model_qs = account_model_qs.with_roles(
-            roles=[
-                BankAccountModel.ACCOUNT_TYPE_DEFAULT_ROLE_MAPPING[account_type]
-            ]
+            roles=[BankAccountModel.ACCOUNT_TYPE_DEFAULT_ROLE_MAPPING[account_type]]
         ).is_role_default()
 
         bank_account_model = BankAccountModel(
@@ -2058,7 +2090,7 @@ class EntityModelAbstract(MP_Node,
             account_type=account_type,
             active=active,
             account_model=account_model_qs.get() if not account_model else account_model,
-            **bank_account_model_kwargs
+            **bank_account_model_kwargs,
         )
 
         bank_account_model.clean()
@@ -2118,12 +2150,7 @@ class EntityModelAbstract(MP_Node,
         -------
         UnitOfMeasureModel
         """
-        uom_model = UnitOfMeasureModel(
-            name=name,
-            unit_abbr=unit_abbr,
-            is_active=active,
-            entity=self
-        )
+        uom_model = UnitOfMeasureModel(name=name, unit_abbr=unit_abbr, is_active=active, entity=self)
         uom_model.clean()
         uom_model.clean_fields()
         if commit:
@@ -2151,7 +2178,7 @@ class EntityModelAbstract(MP_Node,
             'inventory_account',
             'cogs_account',
             'earnings_account',
-            'expense_account'
+            'expense_account',
         )
         if active:
             return qs.active()
@@ -2175,12 +2202,14 @@ class EntityModelAbstract(MP_Node,
         qs = self.get_items_all(active=active)
         return qs.products()
 
-    def create_item_product(self,
-                            name: str,
-                            item_type: str,
-                            uom_model: Union[UUID, UnitOfMeasureModel],
-                            coa_model: Optional[Union[ChartOfAccountModel, UUID, str]] = None,
-                            commit: bool = True) -> ItemModel:
+    def create_item_product(
+        self,
+        name: str,
+        item_type: str,
+        uom_model: Union[UUID, UnitOfMeasureModel],
+        coa_model: Optional[Union[ChartOfAccountModel, UUID, str]] = None,
+        commit: bool = True,
+    ) -> ItemModel:
         """
         Creates a new items of type PRODUCT.
 
@@ -2212,8 +2241,9 @@ class EntityModelAbstract(MP_Node,
             roles=[
                 roles_module.ASSET_CA_INVENTORY,
                 roles_module.COGS,
-                roles_module.INCOME_OPERATIONAL
-            ]).is_role_default()
+                roles_module.INCOME_OPERATIONAL,
+            ]
+        ).is_role_default()
 
         # evaluates the queryset...
         len(account_model_qs)
@@ -2226,7 +2256,7 @@ class EntityModelAbstract(MP_Node,
             item_type=item_type,
             inventory_account=account_model_qs.filter(role=roles_module.ASSET_CA_INVENTORY).get(),
             earnings_account=account_model_qs.filter(role=roles_module.INCOME_OPERATIONAL).get(),
-            cogs_account=account_model_qs.filter(role=roles_module.COGS).get()
+            cogs_account=account_model_qs.filter(role=roles_module.COGS).get(),
         )
         product_model.clean()
         product_model.clean_fields()
@@ -2252,11 +2282,13 @@ class EntityModelAbstract(MP_Node,
         qs = self.get_items_all(active=active)
         return qs.services()
 
-    def create_item_service(self,
-                            name: str,
-                            uom_model: Union[UUID, UnitOfMeasureModel],
-                            coa_model: Optional[Union[ChartOfAccountModel, UUID, str]] = None,
-                            commit: bool = True) -> ItemModel:
+    def create_item_service(
+        self,
+        name: str,
+        uom_model: Union[UUID, UnitOfMeasureModel],
+        coa_model: Optional[Union[ChartOfAccountModel, UUID, str]] = None,
+        commit: bool = True,
+    ) -> ItemModel:
         """
         Creates a new items of type SERVICE.
 
@@ -2285,10 +2317,8 @@ class EntityModelAbstract(MP_Node,
 
         account_model_qs = self.get_coa_accounts(coa_model=coa_model, active=True)
         account_model_qs = account_model_qs.with_roles(
-            roles=[
-                roles_module.COGS,
-                roles_module.INCOME_OPERATIONAL
-            ]).is_role_default()
+            roles=[roles_module.COGS, roles_module.INCOME_OPERATIONAL]
+        ).is_role_default()
 
         # evaluates the queryset...
         len(account_model_qs)
@@ -2300,7 +2330,7 @@ class EntityModelAbstract(MP_Node,
             item_role=ItemModel.ITEM_ROLE_SERVICE,
             item_type=ItemModel.ITEM_TYPE_LABOR,
             earnings_account=account_model_qs.filter(role=roles_module.INCOME_OPERATIONAL).get(),
-            cogs_account=account_model_qs.filter(role=roles_module.COGS).get()
+            cogs_account=account_model_qs.filter(role=roles_module.COGS).get(),
         )
         service_model.clean()
         service_model.clean_fields()
@@ -2326,14 +2356,15 @@ class EntityModelAbstract(MP_Node,
         qs = self.get_items_all(active=active)
         return qs.expenses()
 
-    def create_item_expense(self,
-                            name: str,
-                            expense_type: str,
-                            uom_model: Union[UUID, UnitOfMeasureModel],
-                            expense_account: Optional[Union[UUID, AccountModel]] = None,
-                            coa_model: Optional[Union[ChartOfAccountModel, UUID, str]] = None,
-                            commit: bool = True) -> ItemModel:
-
+    def create_item_expense(
+        self,
+        name: str,
+        expense_type: str,
+        uom_model: Union[UUID, UnitOfMeasureModel],
+        expense_account: Optional[Union[UUID, AccountModel]] = None,
+        coa_model: Optional[Union[ChartOfAccountModel, UUID, str]] = None,
+        commit: bool = True,
+    ) -> ItemModel:
         """
         Creates a new items of type EXPENSE.
 
@@ -2364,9 +2395,7 @@ class EntityModelAbstract(MP_Node,
                 raise EntityModelValidationError(f'Invalid UnitOfMeasureModel for entity {self.slug}...')
 
         account_model_qs = self.get_coa_accounts(coa_model=coa_model, active=True)
-        account_model_qs = account_model_qs.with_roles(
-            roles=roles_module.EXPENSE_OPERATIONAL
-        )
+        account_model_qs = account_model_qs.with_roles(roles=roles_module.EXPENSE_OPERATIONAL)
         if not expense_account:
             expense_account = account_model_qs.is_role_default().get()
         elif isinstance(expense_account, UUID):
@@ -2381,7 +2410,7 @@ class EntityModelAbstract(MP_Node,
             uom=uom_model,
             item_role=ItemModel.ITEM_ROLE_EXPENSE,
             item_type=expense_type,
-            expense_account=expense_account
+            expense_account=expense_account,
         )
         expense_item_model.clean()
         expense_item_model.clean_fields()
@@ -2427,13 +2456,15 @@ class EntityModelAbstract(MP_Node,
         qs = self.get_items_all(active=active)
         return qs.inventory_wip()
 
-    def create_item_inventory(self,
-                              name: str,
-                              uom_model: Union[UUID, UnitOfMeasureModel],
-                              item_type: str,
-                              inventory_account: Optional[Union[UUID, AccountModel]] = None,
-                              coa_model: Optional[Union[ChartOfAccountModel, UUID, str]] = None,
-                              commit: bool = True):
+    def create_item_inventory(
+        self,
+        name: str,
+        uom_model: Union[UUID, UnitOfMeasureModel],
+        item_type: str,
+        inventory_account: Optional[Union[UUID, AccountModel]] = None,
+        coa_model: Optional[Union[ChartOfAccountModel, UUID, str]] = None,
+        commit: bool = True,
+    ):
         """
         Creates a new items of type INVENTORY.
 
@@ -2465,9 +2496,7 @@ class EntityModelAbstract(MP_Node,
                 raise EntityModelValidationError(f'Invalid UnitOfMeasureModel for entity {self.slug}...')
 
         account_model_qs = self.get_coa_accounts(coa_model=coa_model, active=True)
-        account_model_qs = account_model_qs.with_roles(
-            roles=roles_module.ASSET_CA_INVENTORY
-        )
+        account_model_qs = account_model_qs.with_roles(roles=roles_module.ASSET_CA_INVENTORY)
         if not inventory_account:
             inventory_account = account_model_qs.is_role_default().get()
         elif isinstance(inventory_account, UUID):
@@ -2484,7 +2513,7 @@ class EntityModelAbstract(MP_Node,
             entity=self,
             item_type=item_type,
             item_role=ItemModel.ITEM_ROLE_INVENTORY,
-            inventory_account=inventory_account
+            inventory_account=inventory_account,
         )
         inventory_item_model.clean()
         inventory_item_model.clean_fields()
@@ -2523,40 +2552,41 @@ class EntityModelAbstract(MP_Node,
             (i['item_model_id'], i['item_model__name'], i['item_model__uom__name']): {
                 'count': i['quantity_onhand'],
                 'value': i['value_onhand'],
-                'avg_cost': i['cost_average']
-                if i['quantity_onhand'] else Decimal('0.00')
-            } for i in counted_qs
+                'avg_cost': i['cost_average'] if i['quantity_onhand'] else Decimal('0.00'),
+            }
+            for i in counted_qs
         }
         recorded_map = {
             (i['uuid'], i['name'], i['uom__name']): {
                 'count': i['inventory_received'] or Decimal.from_float(0.0),
                 'value': i['inventory_received_value'] or Decimal.from_float(0.0),
                 'avg_cost': i['inventory_received_value'] / i['inventory_received']
-                if i['inventory_received'] else Decimal('0.00')
-            } for i in recorded_qs
+                if i['inventory_received']
+                else Decimal('0.00'),
+            }
+            for i in recorded_qs
         }
 
         # todo: change this to use a groupby then sum...
         item_ids = list(set(list(counted_map.keys()) + list(recorded_map)))
-        adjustment = defaultdict(lambda: {
-            # keeps track of inventory recounts...
-            'counted': Decimal('0.000'),
-            'counted_value': Decimal('0.00'),
-            'counted_avg_cost': Decimal('0.00'),
-
-            # keeps track of inventory level...
-            'recorded': Decimal('0.000'),
-            'recorded_value': Decimal('0.00'),
-            'recorded_avg_cost': Decimal('0.00'),
-
-            # keeps track of necessary inventory adjustment...
-            'count_diff': Decimal('0.000'),
-            'value_diff': Decimal('0.00'),
-            'avg_cost_diff': Decimal('0.00')
-        })
+        adjustment = defaultdict(
+            lambda: {
+                # keeps track of inventory recounts...
+                'counted': Decimal('0.000'),
+                'counted_value': Decimal('0.00'),
+                'counted_avg_cost': Decimal('0.00'),
+                # keeps track of inventory level...
+                'recorded': Decimal('0.000'),
+                'recorded_value': Decimal('0.00'),
+                'recorded_avg_cost': Decimal('0.00'),
+                # keeps track of necessary inventory adjustment...
+                'count_diff': Decimal('0.000'),
+                'value_diff': Decimal('0.00'),
+                'avg_cost_diff': Decimal('0.00'),
+            }
+        )
 
         for uid in item_ids:
-
             count_data = counted_map.get(uid)
             if count_data:
                 avg_cost = count_data['value'] / count_data['count'] if count_data['count'] else Decimal('0.000')
@@ -2583,8 +2613,9 @@ class EntityModelAbstract(MP_Node,
                 adjustment[uid]['avg_cost_diff'] -= avg_cost
         return adjustment
 
-    def update_inventory(self,
-                         commit: bool = False) -> Tuple[defaultdict, ItemTransactionModelQuerySet, ItemModelQuerySet]:
+    def update_inventory(
+        self, commit: bool = False
+    ) -> Tuple[defaultdict, ItemTransactionModelQuerySet, ItemModelQuerySet]:
         """
         Triggers an inventory recount with optional commitment of transaction.
 
@@ -2604,7 +2635,7 @@ class EntityModelAbstract(MP_Node,
         ItemTransactionModel = lazy_loader.get_item_transaction_model()
         ItemModel = lazy_loader.get_item_model()
 
-        counted_qs: ItemTransactionModelQuerySet = ItemTransactionModel.objects.inventory_count(entity_slug=self.slug)
+        counted_qs: ItemTransactionModelQuerySet = ItemTransactionModel.objects.inventory_count(entity_model=self.slug)
         recorded_qs: ItemModelQuerySet = self.recorded_inventory(as_values=False)
         recorded_qs_values = self.recorded_inventory(item_qs=recorded_qs, as_values=True)
 
@@ -2619,18 +2650,16 @@ class EntityModelAbstract(MP_Node,
             updated_items.append(item_model)
 
         if commit:
-            ItemModel.objects.bulk_update(updated_items,
-                                          fields=[
-                                              'inventory_received',
-                                              'inventory_received_value',
-                                              'updated'
-                                          ])
+            ItemModel.objects.bulk_update(
+                updated_items,
+                fields=['inventory_received', 'inventory_received_value', 'updated'],
+            )
 
         return adj, counted_qs, recorded_qs
 
-    def recorded_inventory(self,
-                           item_qs: Optional[ItemModelQuerySet] = None,
-                           as_values: bool = True) -> ItemModelQuerySet:
+    def recorded_inventory(
+        self, item_qs: Optional[ItemModelQuerySet] = None, as_values: bool = True
+    ) -> ItemModelQuerySet:
         """
         Recorded inventory on the books marked as received. PurchaseOrderModel drives the ordering and receiving of
         inventory. Once inventory is marked as "received" recorded inventory of each item is updated by calling
@@ -2659,21 +2688,27 @@ class EntityModelAbstract(MP_Node,
             recorded_qs = item_qs
         if as_values:
             return recorded_qs.values(
-                'uuid', 'name', 'uom__name', 'inventory_received', 'inventory_received_value')
+                'uuid',
+                'name',
+                'uom__name',
+                'inventory_received',
+                'inventory_received_value',
+            )
         return recorded_qs
 
     # COMMON TRANSACTIONS...
-    def deposit_capital(self,
-                        amount: Union[Decimal, float],
-                        cash_account: Optional[Union[AccountModel, BankAccountModel]] = None,
-                        capital_account: Optional[AccountModel] = None,
-                        description: Optional[str] = None,
-                        coa_model: Optional[Union[ChartOfAccountModel, UUID, str]] = None,
-                        ledger_model: Optional[Union[LedgerModel, UUID]] = None,
-                        ledger_posted: bool = False,
-                        je_timestamp: Optional[Union[datetime, date, str]] = None,
-                        je_posted: bool = False):
-
+    def deposit_capital(
+        self,
+        amount: Union[Decimal, float],
+        cash_account: Optional[Union[AccountModel, BankAccountModel]] = None,
+        capital_account: Optional[AccountModel] = None,
+        description: Optional[str] = None,
+        coa_model: Optional[Union[ChartOfAccountModel, UUID, str]] = None,
+        ledger_model: Optional[Union[LedgerModel, UUID]] = None,
+        ledger_posted: bool = False,
+        je_timestamp: Optional[Union[datetime, date, str]] = None,
+        je_posted: bool = False,
+    ):
         if coa_model:
             self.validate_chart_of_accounts_for_entity(coa_model)
         else:
@@ -2687,9 +2722,7 @@ class EntityModelAbstract(MP_Node,
             ROLES_NEEDED.append(roles_module.EQUITY_CAPITAL)
 
         account_model_qs = self.get_coa_accounts(coa_model=coa_model)
-        account_model_qs = account_model_qs.with_roles(
-            roles=ROLES_NEEDED
-        ).is_role_default()
+        account_model_qs = account_model_qs.with_roles(roles=ROLES_NEEDED).is_role_default()
 
         if not cash_account or not capital_account:
             if cash_account or capital_account:
@@ -2716,23 +2749,27 @@ class EntityModelAbstract(MP_Node,
             description = f'Capital Deposit on {je_timestamp.isoformat()}...'
 
         txs = list()
-        txs.append({
-            'account': cash_account,
-            'tx_type': DEBIT,
-            'amount': amount,
-            'description': description
-        })
-        txs.append({
-            'account': capital_account,
-            'tx_type': CREDIT,
-            'amount': amount,
-            'description': description
-        })
+        txs.append(
+            {
+                'account': cash_account,
+                'tx_type': DEBIT,
+                'amount': amount,
+                'description': description,
+            }
+        )
+        txs.append(
+            {
+                'account': capital_account,
+                'tx_type': CREDIT,
+                'amount': amount,
+                'description': description,
+            }
+        )
 
         if not ledger_model:
             ledger_model = self.ledgermodel_set.create(
                 name=f'Capital Deposit on {je_timestamp.isoformat()}.',
-                posted=ledger_posted
+                posted=ledger_posted,
             )
         else:
             if isinstance(ledger_model, LedgerModel):
@@ -2745,7 +2782,7 @@ class EntityModelAbstract(MP_Node,
             je_timestamp=je_timestamp,
             je_txs=txs,
             je_posted=je_posted,
-            je_ledger_model=ledger_model
+            je_ledger_model=ledger_model,
         )
 
         return ledger_model
@@ -2779,12 +2816,7 @@ class EntityModelAbstract(MP_Node,
 
         self.meta[self.META_KEY_CLOSING_ENTRY_DATES] = [d.isoformat() for d in date_list]
         if commit:
-            self.save(
-                update_fields=[
-                    'last_closing_date',
-                    'updated',
-                    'meta'
-                ])
+            self.save(update_fields=['last_closing_date', 'updated', 'meta'])
         return date_list
 
     def fetch_closing_entry_dates_meta(self, as_date: bool = True) -> List[date]:
@@ -2820,10 +2852,12 @@ class EntityModelAbstract(MP_Node,
         if not len(ce_date_list):
             return
 
-        if all([
-            isinstance(io_date, date),
-            isinstance(io_date, datetime),
-        ]):
+        if all(
+            [
+                isinstance(io_date, date),
+                isinstance(io_date, datetime),
+            ]
+        ):
             io_date = io_date.date()
 
         if io_date > ce_date_list[0]:
@@ -2833,12 +2867,13 @@ class EntityModelAbstract(MP_Node,
             if p and p <= io_date < f:
                 return p
 
-    def close_entity_books(self,
-                           closing_date: Optional[date] = None,
-                           closing_entry_model=None,
-                           force_update: bool = False,
-                           post_closing_entry: bool = True):
-
+    def close_entity_books(
+        self,
+        closing_date: Optional[date] = None,
+        closing_entry_model=None,
+        force_update: bool = False,
+        post_closing_entry: bool = True,
+    ):
         if closing_entry_model and closing_date:
             raise EntityModelValidationError(
                 message=_('Closing books must be called by providing closing_date or closing_entry_model, not both.')
@@ -2856,12 +2891,10 @@ class EntityModelAbstract(MP_Node,
             closing_entry_exists = True
         else:
             try:
-                closing_entry_model = self.closingentrymodel_set.select_related(
-                    'ledger_model',
-                    'ledger_model__entity'
-                ).defer(
-                    'markdown_notes').get(
-                    closing_date__exact=closing_date
+                closing_entry_model = (
+                    self.closingentrymodel_set.select_related('ledger_model', 'ledger_model__entity')
+                    .defer('markdown_notes')
+                    .get(closing_date__exact=closing_date)
                 )
 
                 closing_entry_exists = True
@@ -2882,21 +2915,34 @@ class EntityModelAbstract(MP_Node,
             return closing_entry_model, ce_txs
         raise EntityModelValidationError(message=f'Closing Entry for Period {closing_date} already exists.')
 
-    def close_books_for_month(self, year: int, month: int, force_update: bool = False, post_closing_entry: bool = True):
+    def close_books_for_month(
+        self,
+        year: int,
+        month: int,
+        force_update: bool = False,
+        post_closing_entry: bool = True,
+    ):
         _, day = monthrange(year, month)
         closing_dt = date(year, month, day)
         return self.close_entity_books(
             closing_date=closing_dt,
             force_update=force_update,
             post_closing_entry=post_closing_entry,
-            closing_entry_model=None
+            closing_entry_model=None,
         )
 
-    def close_books_for_fiscal_year(self, fiscal_year: int, force_update: bool = False,
-                                    post_closing_entry: bool = True):
+    def close_books_for_fiscal_year(
+        self,
+        fiscal_year: int,
+        force_update: bool = False,
+        post_closing_entry: bool = True,
+    ):
         closing_dt = self.get_fy_end(year=fiscal_year)
-        return self.close_entity_books(closing_date=closing_dt, force_update=force_update,
-                                       post_closing_entry=post_closing_entry)
+        return self.close_entity_books(
+            closing_date=closing_dt,
+            force_update=force_update,
+            post_closing_entry=post_closing_entry,
+        )
 
     # ### RANDOM DATA GENERATION ####
 
@@ -2908,16 +2954,13 @@ class EntityModelAbstract(MP_Node,
             start_dttm=start_date,
             entity_model=self,
             capital_contribution=Decimal.from_float(50000.00),
-            tx_quantity=tx_quantity
+            tx_quantity=tx_quantity,
         )
         data_generator.populate_entity()
 
     # URLS ----
     def get_absolute_url(self):
-        return reverse(viewname='django_ledger:entity-dashboard',
-                       kwargs={
-                           'entity_slug': self.slug
-                       })
+        return reverse(viewname='django_ledger:entity-dashboard', kwargs={'entity_slug': self.slug})
 
     def get_dashboard_url(self) -> str:
         """
@@ -2928,10 +2971,7 @@ class EntityModelAbstract(MP_Node,
         str
             EntityModel dashboard URL as a string.
         """
-        return reverse('django_ledger:entity-dashboard',
-                       kwargs={
-                           'entity_slug': self.slug
-                       })
+        return reverse('django_ledger:entity-dashboard', kwargs={'entity_slug': self.slug})
 
     def get_manage_url(self) -> str:
         """
@@ -2942,10 +2982,7 @@ class EntityModelAbstract(MP_Node,
         str
             EntityModel manage URL as a string.
         """
-        return reverse('django_ledger:entity-update',
-                       kwargs={
-                           'entity_slug': self.slug
-                       })
+        return reverse('django_ledger:entity-update', kwargs={'entity_slug': self.slug})
 
     def get_ledgers_url(self) -> str:
         """
@@ -2956,10 +2993,7 @@ class EntityModelAbstract(MP_Node,
         str
             EntityModel ledger list URL as a string.
         """
-        return reverse('django_ledger:ledger-list',
-                       kwargs={
-                           'entity_slug': self.slug
-                       })
+        return reverse('django_ledger:ledger-list', kwargs={'entity_slug': self.slug})
 
     def get_bills_url(self) -> str:
         """
@@ -2970,10 +3004,7 @@ class EntityModelAbstract(MP_Node,
         str
             EntityModel bill list URL as a string.
         """
-        return reverse('django_ledger:bill-list',
-                       kwargs={
-                           'entity_slug': self.slug
-                       })
+        return reverse('django_ledger:bill-list', kwargs={'entity_slug': self.slug})
 
     def get_invoices_url(self) -> str:
         """
@@ -2984,10 +3015,7 @@ class EntityModelAbstract(MP_Node,
         str
             EntityModel invoice list URL as a string.
         """
-        return reverse('django_ledger:invoice-list',
-                       kwargs={
-                           'entity_slug': self.slug
-                       })
+        return reverse('django_ledger:invoice-list', kwargs={'entity_slug': self.slug})
 
     def get_banks_url(self) -> str:
         """
@@ -2998,10 +3026,7 @@ class EntityModelAbstract(MP_Node,
         str
             EntityModel bank account list URL as a string.
         """
-        return reverse('django_ledger:bank-account-list',
-                       kwargs={
-                           'entity_slug': self.slug
-                       })
+        return reverse('django_ledger:bank-account-list', kwargs={'entity_slug': self.slug})
 
     def get_balance_sheet_url(self) -> str:
         """
@@ -3012,10 +3037,7 @@ class EntityModelAbstract(MP_Node,
         str
             EntityModel Balance Sheet Statement URL as a string.
         """
-        return reverse('django_ledger:entity-bs',
-                       kwargs={
-                           'entity_slug': self.slug
-                       })
+        return reverse('django_ledger:entity-bs', kwargs={'entity_slug': self.slug})
 
     def get_income_statement_url(self) -> str:
         """
@@ -3026,10 +3048,7 @@ class EntityModelAbstract(MP_Node,
         str
             EntityModel Income Statement URL as a string.
         """
-        return reverse('django_ledger:entity-ic',
-                       kwargs={
-                           'entity_slug': self.slug
-                       })
+        return reverse('django_ledger:entity-ic', kwargs={'entity_slug': self.slug})
 
     def get_cashflow_statement_url(self) -> str:
         """
@@ -3040,10 +3059,7 @@ class EntityModelAbstract(MP_Node,
         str
             EntityModel Cashflow Statement URL as a string.
         """
-        return reverse('django_ledger:entity-cf',
-                       kwargs={
-                           'entity_slug': self.slug
-                       })
+        return reverse('django_ledger:entity-cf', kwargs={'entity_slug': self.slug})
 
     def get_data_import_url(self) -> str:
         """
@@ -3054,34 +3070,19 @@ class EntityModelAbstract(MP_Node,
         str
             EntityModel transaction import URL as a string.
         """
-        return reverse('django_ledger:data-import-jobs-list',
-                       kwargs={
-                           'entity_slug': self.slug
-                       })
+        return reverse('django_ledger:data-import-jobs-list', kwargs={'entity_slug': self.slug})
 
     def get_coa_list_url(self) -> str:
-        return reverse(
-            viewname='django_ledger:coa-list',
-            kwargs={
-                'entity_slug': self.slug
-            }
-        )
+        return reverse(viewname='django_ledger:coa-list', kwargs={'entity_slug': self.slug})
 
     def get_coa_list_inactive_url(self) -> str:
         return reverse(
             viewname='django_ledger:coa-list-inactive',
-            kwargs={
-                'entity_slug': self.slug
-            }
+            kwargs={'entity_slug': self.slug},
         )
 
     def get_coa_create_url(self) -> str:
-        return reverse(
-            viewname='django_ledger:coa-create',
-            kwargs={
-                'entity_slug': self.slug
-            }
-        )
+        return reverse(viewname='django_ledger:coa-create', kwargs={'entity_slug': self.slug})
 
     def get_accounts_url(self) -> str:
         """
@@ -3092,10 +3093,12 @@ class EntityModelAbstract(MP_Node,
         str
             EntityModel Code of Accounts llist import URL as a string.
         """
-        return reverse('django_ledger:account-list',
-                       kwargs={
-                           'entity_slug': self.slug,
-                       })
+        return reverse(
+            'django_ledger:account-list',
+            kwargs={
+                'entity_slug': self.slug,
+            },
+        )
 
     def get_customers_url(self) -> str:
         """
@@ -3106,10 +3109,12 @@ class EntityModelAbstract(MP_Node,
         str
             EntityModel customers list URL as a string.
         """
-        return reverse('django_ledger:customer-list',
-                       kwargs={
-                           'entity_slug': self.slug,
-                       })
+        return reverse(
+            'django_ledger:customer-list',
+            kwargs={
+                'entity_slug': self.slug,
+            },
+        )
 
     def get_vendors_url(self) -> str:
         """
@@ -3120,10 +3125,12 @@ class EntityModelAbstract(MP_Node,
         str
             EntityModel vendors list URL as a string.
         """
-        return reverse('django_ledger:vendor-list',
-                       kwargs={
-                           'entity_slug': self.slug,
-                       })
+        return reverse(
+            'django_ledger:vendor-list',
+            kwargs={
+                'entity_slug': self.slug,
+            },
+        )
 
     def get_delete_url(self) -> str:
         """
@@ -3134,10 +3141,7 @@ class EntityModelAbstract(MP_Node,
         str
             EntityModel delete URL as a string.
         """
-        return reverse('django_ledger:entity-delete',
-                       kwargs={
-                           'entity_slug': self.slug
-                       })
+        return reverse('django_ledger:entity-delete', kwargs={'entity_slug': self.slug})
 
     def clean(self):
         if not self.slug:
@@ -3164,6 +3168,7 @@ class EntityStateModelAbstract(Model):
     KEY_VENDOR = 'vendor'
     KEY_CUSTOMER = 'customer'
     KEY_ITEM = 'item'
+    KEY_RECEIPT = 'receipt'
 
     KEY_CHOICES = [
         (KEY_JOURNAL_ENTRY, _('Journal Entry')),
@@ -3174,19 +3179,23 @@ class EntityStateModelAbstract(Model):
     ]
 
     uuid = models.UUIDField(default=uuid4, editable=False, primary_key=True)
-    entity_model = models.ForeignKey('django_ledger.EntityModel',
-                                     on_delete=models.CASCADE,
-                                     verbose_name=_('Entity Model'))
-    entity_unit = models.ForeignKey('django_ledger.EntityUnitModel',
-                                    on_delete=models.RESTRICT,
-                                    verbose_name=_('Entity Unit'),
-                                    blank=True,
-                                    null=True)
+    entity_model = models.ForeignKey(
+        'django_ledger.EntityModel',
+        on_delete=models.CASCADE,
+        verbose_name=_('Entity Model'),
+    )
+    entity_unit = models.ForeignKey(
+        'django_ledger.EntityUnitModel',
+        on_delete=models.RESTRICT,
+        verbose_name=_('Entity Unit'),
+        blank=True,
+        null=True,
+    )
     fiscal_year = models.SmallIntegerField(
         verbose_name=_('Fiscal Year'),
         validators=[MinValueValidator(limit_value=1900)],
         null=True,
-        blank=True
+        blank=True,
     )
     key = models.CharField(choices=KEY_CHOICES, max_length=10)
     sequence = models.BigIntegerField(default=0, validators=[MinValueValidator(limit_value=0)])
@@ -3195,20 +3204,14 @@ class EntityStateModelAbstract(Model):
         abstract = True
         indexes = [
             models.Index(fields=['key']),
-            models.Index(
-                fields=[
-                    'entity_model',
-                    'fiscal_year',
-                    'entity_unit',
-                    'key'
-                ])
+            models.Index(fields=['entity_model', 'fiscal_year', 'entity_unit', 'key']),
         ]
-        unique_together = [
-            ('entity_model', 'entity_unit', 'fiscal_year', 'key')
-        ]
+        unique_together = [('entity_model', 'entity_unit', 'fiscal_year', 'key')]
 
     def __str__(self):
-        return f'{self.__class__.__name__} {self.entity_model_id}: FY: {self.fiscal_year}, KEY: {self.get_key_display()}'
+        return (
+            f'{self.__class__.__name__} {self.entity_model_id}: FY: {self.fiscal_year}, KEY: {self.get_key_display()}'
+        )
 
 
 class EntityStateModel(EntityStateModelAbstract):
@@ -3225,31 +3228,38 @@ class EntityManagementModelAbstract(CreateUpdateMixIn):
     """
     Entity Management Model responsible for manager permissions to read/write.
     """
+
     PERMISSIONS = [
         ('read', _('Read Permissions')),
         ('write', _('Read/Write Permissions')),
-        ('suspended', _('No Permissions'))
+        ('suspended', _('No Permissions')),
     ]
 
     uuid = models.UUIDField(default=uuid4, editable=False, primary_key=True)
-    entity = models.ForeignKey('django_ledger.EntityModel',
-                               on_delete=models.CASCADE,
-                               verbose_name=_('Entity'),
-                               related_name='entity_permissions')
-    user = models.ForeignKey(UserModel,
-                             on_delete=models.CASCADE,
-                             verbose_name=_('Manager'),
-                             related_name='entity_permissions')
-    permission_level = models.CharField(max_length=10,
-                                        default='read',
-                                        choices=PERMISSIONS,
-                                        verbose_name=_('Permission Level'))
+    entity = models.ForeignKey(
+        'django_ledger.EntityModel',
+        on_delete=models.CASCADE,
+        verbose_name=_('Entity'),
+        related_name='entity_permissions',
+    )
+    user = models.ForeignKey(
+        UserModel,
+        on_delete=models.CASCADE,
+        verbose_name=_('Manager'),
+        related_name='entity_permissions',
+    )
+    permission_level = models.CharField(
+        max_length=10,
+        default='read',
+        choices=PERMISSIONS,
+        verbose_name=_('Permission Level'),
+    )
 
     class Meta:
         abstract = True
         indexes = [
             models.Index(fields=['entity', 'user']),
-            models.Index(fields=['user', 'entity'])
+            models.Index(fields=['user', 'entity']),
         ]
 
 

@@ -7,7 +7,8 @@
     <section class="section">
         <div class="container is-fluid p-0">
             <div class="columns">
-                <div class="column is-3 is-hidden-mobile is-hidden-tablet-only">
+                <div class="column is-2 is-hidden-mobile is-hidden-tablet-only">
+
                     <div class="columns is-multiline">
                         <div class="column is-12">
                             {% if view.kwargs.unit_slug or request.GET.unit %}
@@ -20,7 +21,6 @@
                             {% navigation_menu 'desktop' %}
                         </div>
                     </div>
-
 
                 </div>
                 <div class="column">
@@ -44,17 +44,14 @@
     </section>
 
     {# RECEIVABLES SECTION START #}
-    <section class="hero is-light is-bold is-small">
-        <div class="hero-body">
-            <div class="container">
-                <h1 class="title">{% trans 'Receivables' %}</h1>
-                <h2 class="subtitle">
-                    <span class="icon">{% icon "ic:baseline-business" 16 %}</span>{{ entity.name }}</h2>
+    <section class="section pt-0">
+        <div class="container is-fluid px-0">
+            <div class="box has-background-light">
+                <h2 class="title is-4">
+                    <span class="icon mr-2">{% icon "bi:arrow-down-circle" 24 %}</span>
+                    {% trans 'Receivables' %}
+                </h2>
             </div>
-        </div>
-    </section>
-    <section class="section">
-        <div class="container">
             <div class="columns is-multiline is-centered">
                 {% if invoices %}
                     <div class="column is-6-tablet is-4-desktop">
@@ -77,17 +74,14 @@
     {# RECEIVABLES SECTION END #}
 
     {# PAYABLES SECTION START #}
-    <section class="hero is-light is-bold is-small">
-        <div class="hero-body">
-            <div class="container">
-                <h1 class="title">{% trans 'Payables' %}</h1>
-                <h2 class="subtitle">
-                    <span class="icon">{% icon "ic:baseline-business" 16 %}</span>{{ entity.name }}</h2>
+    <section class="section pt-0">
+        <div class="container is-fluid px-0">
+            <div class="box has-background-light">
+                <h2 class="title is-4">
+                    <span class="icon mr-2">{% icon "bi:arrow-up-circle" 24 %}</span>
+                    {% trans 'Payables' %}
+                </h2>
             </div>
-        </div>
-    </section>
-    <section class="section">
-        <div class="container">
             <div class="columns is-multiline is-centered">
                 {% if bills %}
                     <div class="column is-6-tablet is-4-desktop">
