@@ -64,8 +64,7 @@ class BillModelCreateView(BillModelModelBaseView, CreateView):
 
         if self.for_estimate and 'ce_pk' in self.kwargs:
             estimate_qs = EstimateModel.objects.for_entity(
-                entity_slug=self.kwargs['entity_slug'],
-                user_model=self.request.user
+                entity_model=self.AUTHORIZED_ENTITY_MODEL,
             )
             estimate_model: EstimateModel = get_object_or_404(estimate_qs, uuid__exact=self.kwargs['ce_pk'])
             if not estimate_model.can_bind():
@@ -87,8 +86,7 @@ class BillModelCreateView(BillModelModelBaseView, CreateView):
                 return HttpResponseBadRequest()
 
             po_qs = PurchaseOrderModel.objects.for_entity(
-                entity_slug=self.kwargs['entity_slug'],
-                user_model=self.request.user
+                entity_model=self.kwargs['entity_slug'],
             ).prefetch_related('itemtransactionmodel_set')
             po_model: PurchaseOrderModel = get_object_or_404(po_qs, uuid__exact=po_pk)
             po_itemtxs_qs = po_model.itemtransactionmodel_set.filter(
@@ -104,8 +102,7 @@ class BillModelCreateView(BillModelModelBaseView, CreateView):
                                   }) + f'?item_uuids={po_item_uuids_qry_param}'
         elif self.for_estimate:
             estimate_qs = EstimateModel.objects.for_entity(
-                entity_slug=self.kwargs['entity_slug'],
-                user_model=self.request.user
+                entity_model=self.AUTHORIZED_ENTITY_MODEL
             )
             estimate_uuid = self.kwargs['ce_pk']
             estimate_model: EstimateModel = get_object_or_404(estimate_qs, uuid__exact=estimate_uuid)
@@ -137,15 +134,16 @@ class BillModelCreateView(BillModelModelBaseView, CreateView):
     def form_valid(self, form):
         bill_model: BillModel = form.save(commit=False)
         ledger_model, bill_model = bill_model.configure(
-            entity_slug=self.AUTHORIZED_ENTITY_MODEL,
+            entity_slug=self.AUTHORIZED_ENTITY_MODEL.slug,
+            user_model=self.request.user,
             commit_ledger=True
         )
 
         if self.for_estimate:
             ce_pk = self.kwargs['ce_pk']
             estimate_model_qs = EstimateModel.objects.for_entity(
-                entity_slug=self.kwargs['entity_slug'],
-                user_model=self.request.user)
+                entity_model=self.kwargs['entity_slug']
+            )
 
             estimate_model = get_object_or_404(estimate_model_qs, uuid__exact=ce_pk)
             bill_model.bind_estimate(estimate_model=estimate_model, commit=False)
@@ -157,8 +155,7 @@ class BillModelCreateView(BillModelModelBaseView, CreateView):
                 return HttpResponseBadRequest()
             item_uuids = item_uuids.split(',')
             po_qs = PurchaseOrderModel.objects.for_entity(
-                entity_slug=self.kwargs['entity_slug'],
-                user_model=self.request.user
+                entity_model=self.kwargs['entity_slug'],
             )
             po_model: PurchaseOrderModel = get_object_or_404(po_qs, uuid__exact=po_pk)
 
@@ -253,8 +250,6 @@ class BillModelDetailView(BillModelModelBaseView, DetailView):
         title = f'Bill {bill_model.bill_number}'
         context['page_title'] = title
         context['header_title'] = title
-
-        bill_model: BillModel = self.object
         bill_items_qs, item_data = bill_model.get_itemtxs_data()
         context['itemtxs_qs'] = bill_items_qs
         context['total_amount__sum'] = item_data['total_amount__sum']

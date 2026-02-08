@@ -3,6 +3,19 @@
 {% load static %}
 {% load django_ledger %}
 
+{% block header_buttons %}
+    <a href="{% url 'django_ledger:bill-detail' entity_slug=view.kwargs.entity_slug bill_pk=bill_model.uuid %}"
+       class="button is-dark  is-outlined">
+        <span class="icon">{% icon 'bi:arrow-left' 16 %}</span>
+        <span>{% trans 'Back to Detail' %}</span>
+    </a>
+    <a href="{% url 'django_ledger:bill-list' entity_slug=view.kwargs.entity_slug %}"
+       class="button is-primary  is-outlined">
+        <span class="icon">{% icon 'bi:list' 16 %}</span>
+        <span>{% trans 'Bill List' %}</span>
+    </a>
+{% endblock %}
+
 {% block view_content %}
     <div class="container">
         <div class="columns is-multiline">
@@ -15,16 +28,12 @@
                       method="post">
                     {% csrf_token %}
                     {{ form }}
+                    <hr>
                     <button type="submit"
-                            class="button is-primary is-fullwidth djetler_my_1">{% trans 'Save Bill' %}</button>
-
-                    <a href="{% url 'django_ledger:bill-detail' entity_slug=view.kwargs.entity_slug bill_pk=bill_model.uuid %}"
-                       class="button is-small is-dark is-fullwidth mt-2">{% trans 'Back to Bill Detail' %}</a>
-                    <a href="{% url 'django_ledger:bill-list' entity_slug=view.kwargs.entity_slug %}"
-                       class="button is-small is-info is-fullwidth mt-2">{% trans 'Bill List' %}</a>
-                    <a href="{% url 'django_ledger:entity-dashboard' entity_slug=view.kwargs.entity_slug %}"
-                       class="button is-small is-info is-outlined is-fullwidth mt-2">{% trans 'Go To Dashboard' %}</a>
-
+                            class="button is-primary is-fullwidth">
+                        <span class="icon">{% icon 'bi:save' 16 %}</span>
+                        <span>{% trans 'Save Bill' %}</span>
+                    </button>
                 </form>
             </div>
             <div class="column is-12">
@@ -43,20 +52,20 @@
                                     <div class="column is-12">
                                         <h3 class="is-size-3">{% trans 'Bill State' %}</h3>
                                         <p>{{ bill_model.cash_account }}:
-                                            ${{ bill_model.get_amount_cash | currency_format }}</p>
+                                            {% currency_symbol %}{{ bill_model.get_amount_cash | currency_format }}</p>
                                         <p>{{ bill_model.prepaid_account }}:
-                                            ${{ bill_model.get_amount_prepaid | currency_format }}</p>
+                                            {% currency_symbol %}{{ bill_model.get_amount_prepaid | currency_format }}</p>
                                         <p>{{ bill_model.unearned_account }}:
-                                            ${{ bill_model.get_amount_unearned | currency_format }}</p>
+                                            {% currency_symbol %}{{ bill_model.get_amount_unearned | currency_format }}</p>
                                     </div>
                                     <div class="column is-12">
                                         <h3 class="is-size-3">{% trans 'Ledger State' %}</h3>
                                         <p>{{ bill_model.cash_account }}:
-                                            ${{ bill_model.amount_paid | currency_format }}</p>
+                                            {% currency_symbol %}{{ bill_model.amount_paid | currency_format }}</p>
                                         <p>{{ bill_model.prepaid_account }}:
-                                            ${{ bill_model.amount_receivable | currency_format }}</p>
+                                            {% currency_symbol %}{{ bill_model.amount_receivable | currency_format }}</p>
                                         <p>{{ bill_model.unearned_account }}:
-                                            ${{ bill_model.amount_unearned | currency_format }}</p>
+                                            {% currency_symbol %}{{ bill_model.amount_unearned | currency_format }}</p>
                                     </div>
                                     {% now "Y" as current_year %}
                                     {% now "m" as current_month %}
@@ -93,7 +102,7 @@
                 </div>
             {% else %}
                 <div class="column is-12">
-                    <div class="card animate__animated animate__tada">
+                    <div class="card">
                         <div class="card-header">
                             <p class="card-header-title">{% trans 'Bill Configuration' %}</p>
                         </div>

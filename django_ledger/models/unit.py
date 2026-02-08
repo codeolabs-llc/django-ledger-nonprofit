@@ -21,14 +21,15 @@ Key advantages of EntityUnits:
        business units.
 """
 
+import warnings
 from random import choices
-from string import ascii_lowercase, digits, ascii_uppercase
+from string import ascii_lowercase, ascii_uppercase, digits
 from typing import Optional
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from django.core.exceptions import ValidationError
 from django.db import models
-from django.db.models import Q, F
+from django.db.models import F, Q
 from django.urls import reverse
 from django.utils.text import slugify
 from django.utils.translation import gettext_lazy as _
@@ -36,7 +37,9 @@ from treebeard.mp_tree import MP_Node, MP_NodeManager, MP_NodeQuerySet
 
 from django_ledger.io.io_core import IOMixIn
 from django_ledger.models import lazy_loader
+from django_ledger.models.deprecations import deprecated_entity_slug_behavior
 from django_ledger.models.mixins import CreateUpdateMixIn, SlugNameMixIn
+from django_ledger.settings import DJANGO_LEDGER_USE_DEPRECATED_BEHAVIOR
 
 ENTITY_UNIT_RANDOM_SLUG_SUFFIX = ascii_lowercase + digits
 
@@ -46,13 +49,15 @@ class EntityUnitModelValidationError(ValidationError):
 
 
 class EntityUnitModelQuerySet(MP_NodeQuerySet):
-    """
-    A custom defined EntityUnitModel Queryset.
-    """
+    def for_user(self, user_model) -> 'EntityUnitModelQuerySet':
+        if user_model.is_superuser:
+            return self
+        return self.filter(
+            Q(entity__admin=user_model) | Q(entity__managers__in=[user_model])
+        )
 
 
 class EntityUnitModelManager(MP_NodeManager):
-
     def get_queryset(self):
         qs = EntityUnitModelQuerySet(self.model, using=self._db)
         return qs.annotate(
@@ -60,47 +65,64 @@ class EntityUnitModelManager(MP_NodeManager):
             _entity_name=F('entity__name'),
         )
 
-    def for_user(self, user_model):
-        qs = self.get_queryset()
-        if user_model.is_superuser:
-            return qs
-        return qs.filter(
-            Q(entity__admin=user_model) |
-            Q(entity__managers__in=[user_model])
-        )
-
-    def for_entity(self, entity_slug: str, user_model):
+    @deprecated_entity_slug_behavior
+    def for_entity(self, entity_model: 'EntityModel | str | UUID' = None, **kwargs):
         """
-        Fetches a QuerySet of EntityUnitModels associated with a specific EntityModel & UserModel.
-        May pass an instance of EntityModel or a String representing the EntityModel slug.
+        Filter the queryset based on the provided entity model, its slug, or its UUID.
+
+        Provides functionality to filter entities within a queryset by comparing either
+        an EntityModel instance, its slug, or its UUID. This method also handles optional
+        deprecated behavior for filtering by the 'user_model' for backward compatibility.
 
         Parameters
         ----------
-        entity_slug: str or EntityModel
-            The entity slug or EntityModel used for filtering the QuerySet.
-        user_model
-            Logged in and authenticated django UserModel instance.
+        entity_model : EntityModel | str | UUID
+            An entity filter criterion that could be a specific EntityModel instance, a
+            string representing the entity slug, or a UUID corresponding to the entity.
+
+        **kwargs : dict, optional
+            Additional keyword arguments. If the 'user_model' parameter is provided,
+            a deprecation warning is issued, and the functionality temporarily delegates
+            to legacy behavior based on the value of 'DJANGO_LEDGER_USE_DEPRECATED_BEHAVIOR'.
 
         Returns
         -------
-        EntityUnitModelQuerySet
-            Returns a EntityUnitModelQuerySet with applied filters.
+        QuerySet
+            A queryset filtered based on the provided entity criteria.
+
+        Raises
+        ------
+        EntityUnitModelValidationError
+            Raised when the `entity_model` parameter does not match any of the accepted types
+            (EntityModel, str, or UUID) and fails validation.
         """
-        qs = self.for_user(user_model)
-        if isinstance(entity_slug, lazy_loader.get_entity_model()):
-            return qs.filter(
-                Q(entity=entity_slug)
+        EntityModel = lazy_loader.get_entity_model()
 
+        qs = self.get_queryset()
+        if 'user_model' in kwargs:
+            warnings.warn(
+                'user_model parameter is deprecated and will be removed in a future release. '
+                'Use for_user(user_model).for_entity(entity_model) instead to keep current behavior.',
+                DeprecationWarning,
+                stacklevel=2,
             )
-        return qs.filter(
-            Q(entity__slug__exact=entity_slug)
-        )
+            if DJANGO_LEDGER_USE_DEPRECATED_BEHAVIOR:
+                qs = qs.for_user(kwargs['user_model'])
+
+        if isinstance(entity_model, EntityModel):
+            qs = qs.filter(entity=entity_model)
+        elif isinstance(entity_model, str):
+            qs = qs.filter(entity__slug__exact=entity_model)
+        elif isinstance(entity_model, UUID):
+            qs = qs.filter(entity_id=entity_model)
+        else:
+            raise EntityUnitModelValidationError(
+                message='Must pass EntityModel, slug or UUID'
+            )
+        return qs
 
 
-class EntityUnitModelAbstract(MP_Node,
-                              IOMixIn,
-                              SlugNameMixIn,
-                              CreateUpdateMixIn):
+class EntityUnitModelAbstract(MP_Node, IOMixIn, SlugNameMixIn, CreateUpdateMixIn):
     """
     Base implementation of the EntityUnitModel.
 
@@ -125,18 +147,22 @@ class EntityUnitModelAbstract(MP_Node,
     hidden: bool
         Hidden Units will not show on drop down menus on the UI. Defaults to False.
     """
+
     uuid = models.UUIDField(default=uuid4, editable=False, primary_key=True)
     slug = models.SlugField(max_length=50)
-    entity = models.ForeignKey('django_ledger.EntityModel',
-                               editable=False,
-                               on_delete=models.CASCADE,
-                               verbose_name=_('Unit Entity'))
+    entity = models.ForeignKey(
+        'django_ledger.EntityModel',
+        editable=False,
+        on_delete=models.CASCADE,
+        verbose_name=_('Unit Entity'),
+    )
     document_prefix = models.CharField(max_length=3)
     active = models.BooleanField(default=True, verbose_name=_('Is Active'))
     hidden = models.BooleanField(default=False, verbose_name=_('Is Hidden'))
 
-    objects = EntityUnitModelManager.from_queryset(queryset_class=EntityUnitModelQuerySet)()
-    node_order_by = ['uuid']
+    objects = EntityUnitModelManager.from_queryset(
+        queryset_class=EntityUnitModelQuerySet
+    )()
 
     class Meta:
         abstract = True
@@ -186,19 +212,20 @@ class EntityUnitModelAbstract(MP_Node,
         str
             The EntityModelUnit instance dashboard URL.
         """
-        return reverse('django_ledger:unit-dashboard',
-                       kwargs={
-                           'entity_slug': self.slug
-                       })
+        return reverse(
+            'django_ledger:unit-dashboard', kwargs={'entity_slug': self.slug}
+        )
 
     def get_entity_name(self) -> str:
         return self.entity.name
 
-    def create_entity_unit_slug(self,
-                                name: Optional[str] = None,
-                                force: bool = False,
-                                add_suffix: bool = True,
-                                k: int = 5) -> str:
+    def create_entity_unit_slug(
+        self,
+        name: Optional[str] = None,
+        force: bool = False,
+        add_suffix: bool = True,
+        k: int = 5,
+    ) -> str:
         """
         Automatically generates a EntityUnitModel slug. If slug is present, will not be replaced.
         Called during the clean() method.
@@ -229,13 +256,24 @@ class EntityUnitModelAbstract(MP_Node,
             self.slug = unit_slug
         return self.slug
 
+    def validate_for_entity(self, entity_model: 'EntityModel | str | UUID'):
+        EntityModel = lazy_loader.get_entity_model()
+
+        if isinstance(entity_model, UUID):
+            is_valid = self.entity_id == entity_model
+        elif isinstance(entity_model, str):
+            is_valid = self.entity_slug == entity_model
+        elif isinstance(entity_model, EntityModel):
+            is_valid = self.entity == entity_model
+        if not is_valid:
+            raise EntityUnitModelValidationError(
+                f'Entity Unit Model {entity_model} is not a valid Entity Model'
+            )
+
     def get_absolute_url(self):
         return reverse(
             viewname='django_ledger:unit-detail',
-            kwargs={
-                'entity_slug': self.entity.slug,
-                'unit_slug': self.slug
-            }
+            kwargs={'entity_slug': self.entity.slug, 'unit_slug': self.slug},
         )
 
 
