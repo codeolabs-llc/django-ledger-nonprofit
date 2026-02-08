@@ -9,18 +9,18 @@ goods or services. The model manages all the Sales Invoices which are issued by 
 due amount.
 
 Examples
---------
-    user_model = request.user  # django UserModel
-    entity_slug = kwargs['entity_slug'] # may come from view kwargs
-    invoice_model = InvoiceModel()
-    ledger_model, invoice_model = invoice_model.configure(entity_slug=entity_slug, user_model=user_model)
-    invoice_model.save()
+________
+>>> user_model = request.user  # django UserModel
+>>> entity_slug = kwargs['entity_slug'] # may come from view kwargs
+>>> invoice_model = InvoiceModel()
+>>> ledger_model, invoice_model = invoice_model.configure(entity_slug=entity_slug, user_model=user_model)
+>>> invoice_model.save()
 """
-
+import warnings
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Union, Optional, Tuple, Dict, List
-from uuid import uuid4
+from typing import Union, Optional, Tuple, Dict
+from uuid import uuid4, UUID
 
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError, ObjectDoesNotExist
@@ -32,11 +32,12 @@ from django.urls import reverse
 from django.utils.translation import gettext_lazy as _
 
 from django_ledger.io import ASSET_CA_CASH, ASSET_CA_RECEIVABLES, LIABILITY_CL_DEFERRED_REVENUE
-from django_ledger.io.utils import get_localtime, get_localdate
+from django_ledger.io.io_core import get_localtime, get_localdate
 from django_ledger.models import (
     lazy_loader, ItemTransactionModelQuerySet,
-    ItemModelQuerySet, ItemModel, QuerySet, Manager, ItemTransactionModel
+    ItemModelQuerySet, ItemModel, QuerySet, Manager
 )
+from django_ledger.models.deprecations import deprecated_entity_slug_behavior
 from django_ledger.models.entity import EntityModel
 from django_ledger.models.mixins import (
     CreateUpdateMixIn, AccrualMixIn,
@@ -51,7 +52,8 @@ from django_ledger.models.signals import (
     invoice_status_canceled,
     invoice_status_void
 )
-from django_ledger.settings import DJANGO_LEDGER_DOCUMENT_NUMBER_PADDING, DJANGO_LEDGER_INVOICE_NUMBER_PREFIX
+from django_ledger.settings import DJANGO_LEDGER_DOCUMENT_NUMBER_PADDING, DJANGO_LEDGER_INVOICE_NUMBER_PREFIX, \
+    DJANGO_LEDGER_USE_DEPRECATED_BEHAVIOR
 
 UserModel = get_user_model()
 
@@ -176,6 +178,14 @@ class InvoiceModelQuerySet(QuerySet):
         """
         return self.filter(invoice_status__exact=InvoiceModel.INVOICE_STATUS_APPROVED)
 
+    def for_user(self, user_model):
+        if user_model.is_superuser:
+            return self
+        return self.filter(
+            Q(ledger__entity__admin=user_model) |
+            Q(ledger__entity__managers__in=[user_model])
+        )
+
 
 class InvoiceModelManager(Manager):
     """
@@ -183,50 +193,52 @@ class InvoiceModelManager(Manager):
     The default "get_queryset" has been overridden to refer the custom defined "InvoiceModelQuerySet"
     """
 
-    def get_queryset(self):
-        qs = super().get_queryset()
+    def get_queryset(self) -> InvoiceModelQuerySet:
+        qs = InvoiceModelQuerySet(self.model, using=self._db)
         return qs.select_related(
             'ledger',
             'ledger__entity'
         )
 
-    def for_user(self, user_model):
-        qs = self.get_queryset()
-        if user_model.is_superuser:
-            return qs
-        return qs.filter(
-            Q(ledger__entity__admin=user_model) |
-            Q(ledger__entity__managers__in=[user_model])
-        )
-
-    def for_entity(self, entity_slug, user_model) -> Union[InvoiceModelQuerySet, None]:
+    @deprecated_entity_slug_behavior
+    def for_entity(self, entity_model: EntityModel | str | UUID = None, **kwargs) -> InvoiceModelQuerySet:
         """
         Returns a QuerySet of InvoiceModels associated with a specific EntityModel & UserModel.
         May pass an instance of EntityModel or a String representing the EntityModel slug.
 
         Parameters
         ----------
-        entity_slug: str or EntityModel
+        entity_model: str or EntityModel
             The entity slug or EntityModel used for filtering the QuerySet.
-        user_model
-            The request UserModel to check for privileges.
 
         Returns
         -------
         InvoiceModelQuerySet
             A Filtered InvoiceModelQuerySet.
         """
-        qs = self.for_user(user_model)
-        if isinstance(entity_slug, EntityModel):
-            return qs.filter(ledger__entity=entity_slug)
-        elif isinstance(entity_slug, str):
-            return qs.filter(ledger__entity__slug__exact=entity_slug)
-        else:
-            return None
+        qs = self.get_queryset()
 
-    def for_entity_unpaid(self, entity_slug, user_model):
-        qs = self.for_entity(entity_slug=entity_slug, user_model=user_model)
-        return qs.approved()
+        if 'user_model' in kwargs:
+            warnings.warn(
+                'user_model parameter is deprecated and will be removed in a future release. '
+                'Use for_user(user_model).for_entity(entity_model) instead to keep current behavior.',
+                DeprecationWarning,
+                stacklevel=2
+            )
+            if DJANGO_LEDGER_USE_DEPRECATED_BEHAVIOR:
+                qs = qs.for_user(kwargs['user_model'])
+
+        if isinstance(entity_model, EntityModel):
+            qs = qs.filter(ledger__entity=entity_model)
+        elif isinstance(entity_model, UUID):
+            qs = qs.filter(ledger__entity_id=entity_model)
+        elif isinstance(entity_model, str):
+            qs = qs.filter(ledger__entity__slug__exact=entity_model)
+        else:
+            raise InvoiceModelValidationError(
+                message='Must provide either a string, UUID or an EntityModel',
+            )
+        return qs
 
 
 class InvoiceModelAbstract(
@@ -311,6 +323,11 @@ class InvoiceModelAbstract(
     """
 
     uuid = models.UUIDField(default=uuid4, editable=False, primary_key=True)
+    entity_model = models.ForeignKey('django_ledger.EntityModel',
+                                     on_delete=models.CASCADE,
+                                     null=True,
+                                     blank=True,
+                                     editable=False)
     invoice_number = models.SlugField(max_length=20,
                                       editable=False,
                                       verbose_name=_('Invoice Number'))
@@ -322,14 +339,20 @@ class InvoiceModelAbstract(
 
     cash_account = models.ForeignKey('django_ledger.AccountModel',
                                      on_delete=models.RESTRICT,
+                                     null=True,
+                                     blank=True,
                                      verbose_name=_('Cash Account'),
                                      related_name=f'{REL_NAME_PREFIX}_cash_account')
     prepaid_account = models.ForeignKey('django_ledger.AccountModel',
                                         on_delete=models.RESTRICT,
+                                        null=True,
+                                        blank=True,
                                         verbose_name=_('Prepaid Account'),
                                         related_name=f'{REL_NAME_PREFIX}_prepaid_account')
     unearned_account = models.ForeignKey('django_ledger.AccountModel',
                                          on_delete=models.RESTRICT,
+                                         null=True,
+                                         blank=True,
                                          verbose_name=_('Unearned Account'),
                                          related_name=f'{REL_NAME_PREFIX}_unearned_account')
 
@@ -474,10 +497,9 @@ class InvoiceModelAbstract(
     def can_migrate_itemtxs(self) -> bool:
         return self.is_draft()
 
-    def migrate_itemtxs(self, itemtxs: Dict, operation: str, commit: bool = False) -> Union[
-        List[ItemTransactionModel], ItemTransactionModelQuerySet]:
+    def migrate_itemtxs(self, itemtxs: Dict, operation: str, commit: bool = False):
         itemtxs_batch = super().migrate_itemtxs(itemtxs=itemtxs, commit=commit, operation=operation)
-        self.update_amount_due(itemtxs_batch=itemtxs_batch)
+        self.update_amount_due(itemtxs_qs=itemtxs_batch)
         self.get_state(commit=True)
 
         if commit:
@@ -493,70 +515,58 @@ class InvoiceModelAbstract(
             entity_id__exact=self.ledger.entity_id
         ).invoices()
 
-    def validate_itemtxs_batch(self, batch: Union[ItemTransactionModelQuerySet, List[ItemTransactionModel]]):
+    def validate_itemtxs_qs(self, queryset: ItemTransactionModelQuerySet):
         """
-        Validates that the entire ItemTransactionModelQuerySet or list of ItemTransactionModel is bound to the InvoiceModel.
+        Validates that the entire ItemTransactionModelQuerySet is bound to the InvoiceModel.
 
         Parameters
         ----------
-        batch: ItemTransactionModelQuerySet
+        queryset: ItemTransactionModelQuerySet
             ItemTransactionModelQuerySet to validate.
         """
         valid = all([
-            i.invoice_model_id == self.uuid for i in batch
+            i.invoice_model_id == self.uuid for i in queryset
         ])
         if not valid:
-            raise InvoiceModelValidationError(
-                f'Invalid list or queryset. All items must be assigned to Invoice {self.uuid}')
+            raise InvoiceModelValidationError(f'Invalid queryset. All items must be assigned to Invoice {self.uuid}')
 
     def get_itemtxs_data(self,
-                         batch: Union[List[ItemTransactionModel], ItemTransactionModelQuerySet] = None,
+                         queryset: ItemTransactionModelQuerySet = None,
                          aggregate_on_db: bool = False,
                          lazy_agg: bool = False,
-                         ) -> Tuple[Union[List[ItemTransactionModel], ItemTransactionModelQuerySet], Dict]:
+                         ) -> Tuple[ItemTransactionModelQuerySet, Dict]:
         """
-        Fetches the InvoiceModel Items and optionally calculates aggregate statistics.
+        Fetches the InvoiceModel Items and aggregates the QuerySet.
 
         Parameters
         __________
-        batch: list or ItemTransactionModelQuerySet
-            Optional pre-fetched ItemModelQueryset or a list of ItemTransactionModels not yet commited to use.
-            Avoids additional DB query if provided. Otherwise, all item transactions for the InvoiceModel are retrieved.
-        aggregate_on_db: bool
-            If True, and the items were already on DB (i.e. batch is a ItemTransactionModelQuerySet),
-            then the aggregate statistics are calculated from the DB.
-            If False, then aggregate statistics are calculated from the batch.
-        lazy_agg: bool
-            If True, the aggregate statistics are not calculated, and just None is returned.
+        queryset:
+            Optional pre-fetched ItemModelQueryset to use. Avoids additional DB query if provided.
 
         Returns
         _______
-        A tuple:
-            The first value is the original batch if it was provided, else a new ItemTransactionModelQuerySet
-            of all the ItemTransactionModels.
-            The second value is the aggregate statistics of (1) the sum of all item amounts; (2) the count of items
+        A tuple: ItemTransactionModelQuerySet, dict
         """
 
-        if not batch:
-            # noinspection PyUnresolvedReferences
-            batch = self.itemtransactionmodel_set.all().select_related(
+        if not queryset:
+            queryset = self.itemtransactionmodel_set.all().select_related(
                 'item_model',
                 'entity_unit',
                 'po_model',
                 'invoice_model'
             )
         else:
-            self.validate_itemtxs_batch(batch)
+            self.validate_itemtxs_qs(queryset)
 
-        if aggregate_on_db and isinstance(batch, ItemTransactionModelQuerySet):
-            return batch, batch.aggregate(
+        if aggregate_on_db and isinstance(queryset, ItemTransactionModelQuerySet):
+            return queryset, queryset.aggregate(
                 total_amount__sum=Sum('total_amount'),
                 total_items=Count('uuid')
             )
 
-        return batch, {
-            'total_amount__sum': sum(i.total_amount for i in batch),
-            'total_items': len(batch)
+        return queryset, {
+            'total_amount__sum': sum(i.total_amount for i in queryset),
+            'total_items': len(queryset)
         } if not lazy_agg else None
 
     # ### ItemizeMixIn implementation END...
@@ -594,10 +604,9 @@ class InvoiceModelAbstract(
             Optional pre-fetched ItemModelTransactionQueryset to use. Avoids additional DB query if provided.
         """
         if not queryset:
-            # noinspection PyUnresolvedReferences
             queryset = self.itemtransactionmodel_set.all()
         else:
-            self.validate_itemtxs_batch(queryset)
+            self.validate_itemtxs_qs(queryset)
 
         return queryset.select_related('item_model').order_by(
             'item_model__earnings_account__uuid',
@@ -617,26 +626,25 @@ class InvoiceModelAbstract(
             'total_amount').annotate(
             account_unit_total=Sum('total_amount'))
 
-    def update_amount_due(self, itemtxs_batch: Union[
-        List[ItemTransactionModel], ItemTransactionModelQuerySet] = None) -> Union[
-        List[ItemTransactionModel], ItemTransactionModelQuerySet]:
+    def update_amount_due(self,
+                          itemtxs_qs: Optional[ItemTransactionModelQuerySet] = None) -> ItemTransactionModelQuerySet:
         """
         Updates the InvoiceModel amount due.
 
         Parameters
         ----------
-        itemtxs_batch: List or ItemTransactionModelQuerySet
+        itemtxs_qs: ItemTransactionModelQuerySet
             Optional pre-fetched ItemTransactionModelQuerySet. Avoids additional DB if provided.
             Queryset is validated if provided.
 
         Returns
         -------
-        List[ItemTransactionModel] or ItemTransactionModelQuerySet
-            Newly fetched or, if itemtxs_batch was provided the itemtxs_batch.
+        ItemTransactionModelQuerySet
+            Newly fetched of previously fetched ItemTransactionModelQuerySet if provided.
         """
-        itemtxs_batch, itemtxs_agg = self.get_itemtxs_data(batch=itemtxs_batch)
+        itemtxs_qs, itemtxs_agg = self.get_itemtxs_data(queryset=itemtxs_qs)
         self.amount_due = round(itemtxs_agg['total_amount__sum'], 2)
-        return itemtxs_batch
+        return itemtxs_qs
 
     # STATE...
     def is_draft(self) -> bool:
@@ -1115,7 +1123,6 @@ class InvoiceModelAbstract(
         self.date_in_review = get_localdate() if not date_in_review else date_in_review
 
         if not itemtxs_qs:
-            # noinspection PyUnresolvedReferences
             itemtxs_qs = self.itemtransactionmodel_set.all()
         if not itemtxs_qs.count():
             raise InvoiceModelValidationError(message='Cannot review an Invoice without items...')
@@ -1448,6 +1455,7 @@ class InvoiceModelAbstract(
                 user_model=user_model,
                 entity_slug=entity_slug,
                 void=True,
+                void_date=self.date_void,
                 force_migrate=True,
                 raise_exception=False
             )
@@ -1579,7 +1587,7 @@ class InvoiceModelAbstract(
     def delete(self, force_db_delete: bool = False, using=None, keep_parents=False):
         if not force_db_delete:
             self.mark_as_canceled(commit=True)
-            return None
+            return
         if not self.can_delete():
             raise InvoiceModelValidationError(
                 message=_(f'Invoice {self.invoice_number} cannot be deleted...')
@@ -1734,7 +1742,6 @@ class InvoiceModelAbstract(
             An instance of EntityStateModel
         """
         EntityStateModel = lazy_loader.get_entity_state_model()
-        # noinspection PyShadowingNames
         EntityModel = lazy_loader.get_entity_model()
         entity_model = EntityModel.objects.get(uuid__exact=self.ledger.entity_id)
         fy_key = entity_model.get_fy_for_date(dt=self.date_draft)
@@ -1754,7 +1761,6 @@ class InvoiceModelAbstract(
             state_model.refresh_from_db()
             return state_model
         except ObjectDoesNotExist:
-            # noinspection PyShadowingNames
             EntityModel = lazy_loader.get_entity_model()
             entity_model = EntityModel.objects.get(uuid__exact=self.ledger.entity_id)
             fy_key = entity_model.get_fy_for_date(dt=self.date_draft)
@@ -1772,7 +1778,6 @@ class InvoiceModelAbstract(
         except IntegrityError as e:
             if raise_exception:
                 raise e
-            return None
 
     def generate_invoice_number(self, commit: bool = False) -> str:
         """
@@ -1853,10 +1858,12 @@ class InvoiceModel(InvoiceModelAbstract):
         abstract = False
 
 
-# noinspection PyUnusedLocal
 def invoicemodel_presave(instance: InvoiceModel, **kwargs):
     if instance.can_generate_invoice_number():
         instance.generate_invoice_number(commit=False)
+
+    if not instance.entity_model_id:
+        instance.entity_model = instance.ledger.entity
 
 
 pre_save.connect(receiver=invoicemodel_presave, sender=InvoiceModel)

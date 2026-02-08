@@ -10,10 +10,11 @@ Once approved, the user may initiate purchase orders, bills and invoices that wi
 for tracking purposes. It is however not required to always have an EstimateModel, but recommended in order to be able
 to produce more specific financial reports associated with a specific scope of work.
 """
+import warnings
 from datetime import date
 from decimal import Decimal
 from string import ascii_uppercase, digits
-from typing import Union, Optional, List, Dict, Self, Any
+from typing import Union, Optional, List, Dict
 from uuid import uuid4, UUID
 
 from django.contrib.auth import get_user_model
@@ -26,8 +27,8 @@ from django.shortcuts import get_object_or_404
 from django.urls import reverse
 from django.utils.translation import gettext_lazy as _
 
-from django_ledger.io.utils import get_localdate
-from django_ledger.models import BillModelQuerySet, InvoiceModelQuerySet
+from django_ledger.io.io_core import get_localdate
+from django_ledger.models import BillModelQuerySet, InvoiceModelQuerySet, lazy_loader, deprecated_entity_slug_behavior
 from django_ledger.models.customer import CustomerModel
 from django_ledger.models.entity import EntityModel, EntityStateModel
 from django_ledger.models.items import ItemTransactionModelQuerySet, ItemTransactionModel, ItemModelQuerySet, ItemModel
@@ -41,7 +42,8 @@ from django_ledger.models.signals import (
     estimate_status_completed,
     estimate_status_in_review
 )
-from django_ledger.settings import DJANGO_LEDGER_DOCUMENT_NUMBER_PADDING, DJANGO_LEDGER_ESTIMATE_NUMBER_PREFIX
+from django_ledger.settings import DJANGO_LEDGER_DOCUMENT_NUMBER_PADDING, DJANGO_LEDGER_ESTIMATE_NUMBER_PREFIX, \
+    DJANGO_LEDGER_USE_DEPRECATED_BEHAVIOR
 
 ESTIMATE_NUMBER_CHARS = ascii_uppercase + digits
 
@@ -56,6 +58,14 @@ class EstimateModelQuerySet(models.QuerySet):
     """
     A custom-defined LedgerModelManager that implements custom QuerySet methods related to the EstimateModel.
     """
+
+    def for_user(self, user_model):
+        if user_model.is_superuser:
+            return self
+        return self.filter(
+            Q(entity__admin=user_model) |
+            Q(entity__managers__in=[user_model])
+        )
 
     def approved(self):
         """
@@ -113,43 +123,62 @@ class EstimateModelQuerySet(models.QuerySet):
 
 class EstimateModelManager(models.Manager):
     """
-    A custom defined EstimateModelManager that that implements custom QuerySet methods related to the EstimateModel.
+    A custom-defined EstimateModelManager that that implements custom QuerySet methods related to the EstimateModel.
     """
 
-    def for_user(self, user_model):
-        qs = self.get_queryset()
-        if user_model.is_superuser:
-            return qs
-        return qs.filter(
-            Q(entity__admin=user_model) |
-            Q(entity__managers__in=[user_model])
-        )
-
-    def for_entity(self, entity_slug: Union[EntityModel, str], user_model):
+    @deprecated_entity_slug_behavior
+    def for_entity(self, entity_model: Union[EntityModel, str, UUID] = None, **kwargs) -> EstimateModelQuerySet:
         """
-        Fetches a QuerySet of EstimateModels associated with a specific EntityModel & UserModel.
-        May pass an instance of EntityModel or a String representing the EntityModel slug.
+        Filters the queryset based on the given entity model.
+
+        This method allows filtering the queryset by an `entity_model` parameter, which can
+        be of type `EntityModel`, `str`, or `UUID`. It also handles deprecated behavior if
+        `user_model` is passed in the `kwargs`.
 
         Parameters
         ----------
-        entity_slug: str or EntityModel
-            The entity slug or EntityModel used for filtering the QuerySet.
-        user_model
-            Logged in and authenticated django UserModel instance.
+        entity_model : EntityModel, str, UUID
+            Specifies the entity against which the queryset should be filtered. Accepts an
+            `EntityModel` instance, a string (representing the entity slug), or a UUID
+            (representing the entity ID).
+        **kwargs
+            Additional keyword arguments. Supports a deprecated `user_model` argument for
+            backward compatibility.
 
         Returns
         -------
-        EstimateModelQuerySet
-            Returns a EstimateModelQuerySet with applied filters.
+        QuerySet
+            A Django QuerySet filtered according to the given entity model.
+
+        Raises
+        ------
+        EstimateModelValidationError
+            If `entity_model` is of an unsupported type.
         """
-        qs = self.for_user(user_model)
-        if isinstance(entity_slug, EntityModel):
-            return qs.filter(
-                Q(entity=entity_slug)
+        EntityModel = lazy_loader.get_entity_model()
+
+        qs = self.get_queryset()
+        if 'user_model' in kwargs:
+            warnings.warn(
+                'user_model parameter is deprecated and will be removed in a future release. '
+                'Use for_user(user_model).for_entity(entity_model) instead to keep current behavior.',
+                DeprecationWarning,
+                stacklevel=2
             )
-        return qs.filter(
-            Q(entity__slug__exact=entity_slug)
-        )
+            if DJANGO_LEDGER_USE_DEPRECATED_BEHAVIOR:
+                qs = qs.for_user(kwargs['user_model'])
+
+        if isinstance(entity_model, EntityModel):
+            qs = qs.filter(entity=entity_model)
+        elif isinstance(entity_model, str):
+            qs = qs.filter(entity__slug__exact=entity_model)
+        elif isinstance(entity_model, UUID):
+            qs = qs.filter(entity_id=entity_model)
+        else:
+            raise EstimateModelValidationError(
+                message='entity_model must be either a string, UUID or an EntityModel'
+            )
+        return qs
 
 
 class EstimateModelAbstract(CreateUpdateMixIn,
@@ -342,7 +371,7 @@ class EstimateModelAbstract(CreateUpdateMixIn,
                   date_draft: Optional[date] = None,
                   estimate_title: Optional[str] = None,
                   commit: bool = False,
-                  raise_exception: bool = True) -> Union[Self, None]:
+                  raise_exception: bool = True):
         """
         A configuration hook which executes all initial EstimateModel setup.
         Can only call this method once in the lifetime of a EstimateModel.
@@ -367,30 +396,25 @@ class EstimateModelAbstract(CreateUpdateMixIn,
         Returns
         -------
         EstimateModel
-            The configured EstimateModel instance.  If there is an error, we will either raise an exception
-            or return None.
+            The configured EstimateModel instance.
         """
         if not self.is_configured():
             if isinstance(entity_slug, (str, UUID)):
                 if not user_model:
                     if raise_exception:
                         raise EstimateModelValidationError(_('Must pass user_model when using entity_slug.'))
-                    return None
+                    return
                 entity_qs = EntityModel.objects.for_user(user_model=user_model)
                 if isinstance(entity_slug, str):
                     entity_model: EntityModel = get_object_or_404(entity_qs, slug__exact=entity_slug)
                 elif isinstance(entity_slug, UUID):
                     entity_model: EntityModel = get_object_or_404(entity_qs, uuid__exact=entity_slug)
-                else:
-                    if raise_exception:
-                        raise TypeError(_(f'Invalid entity_slug "{entity_slug}"'))
-                    return None
             elif isinstance(entity_slug, EntityModel):
                 entity_model = entity_slug
             else:
                 if raise_exception:
                     raise EstimateModelValidationError('entity_slug must be an instance of str or EntityModel')
-                return None
+                return
 
             if estimate_title:
                 self.title = estimate_title
@@ -622,9 +646,6 @@ class EstimateModelAbstract(CreateUpdateMixIn,
         ----------
         commit: bool
             Commits transaction into current EstimateModel instance.
-        raise_exception: bool
-            If the EstimateModel cannot be marked as Draft, this method will raise an EstimateModelValidationError.
-            Otherwise, it will just return.  Default is True.
         """
         if not self.can_draft():
             if raise_exception:
@@ -697,11 +718,8 @@ class EstimateModelAbstract(CreateUpdateMixIn,
         itemtxs_qs: ItemTransactionModelQuerySet
             Optional, pre-fetched ItemTransactionModelQuerySet. Avoids additional DB query.
             Validated if provided.
-        date_in_review: date, Optional
+        date_in_review: date
             Optional date when EstimateModel instance is In Review. Defaults to localdate().
-        raise_exception: bool, Optional
-            If the EstimateModel cannot be marked as In Review, this method will raise an EstimateModelValidationError.
-            Else it will just return. Default is True.
         """
         if not self.can_review():
             if raise_exception:
@@ -709,10 +727,9 @@ class EstimateModelAbstract(CreateUpdateMixIn,
             return
 
         if not itemtxs_qs:
-            # noinspection PyUnresolvedReferences
             itemtxs_qs = self.itemtransactionmodel_set.all()
         else:
-            self.validate_item_transaction_batch(batch=itemtxs_qs)
+            self.validate_item_transaction_qs(itemtxs_qs=itemtxs_qs)
 
         if not itemtxs_qs.count():
             raise EstimateModelValidationError(message='Cannot review an Estimate without items...')
@@ -789,9 +806,6 @@ class EstimateModelAbstract(CreateUpdateMixIn,
             Commits transaction into current EstimateModel instance.
         date_approved: date
             Optional date when EstimateModel instance is Approved. Defaults to localdate().
-        raise_exception: bool, Optional
-            If the EstimateModel cannot be marked as Approved, this method will raise an EstimateModelValidationError.
-            Otherwise, it will just return.  Default is True.
         """
         if not self.can_approve():
             if raise_exception:
@@ -868,9 +882,6 @@ class EstimateModelAbstract(CreateUpdateMixIn,
             Commits transaction into current EstimateModel instance.
         date_completed: date
             Optional date when EstimateModel instance is completed. Defaults to localdate().
-        raise_exception: bool, Optional
-            If the EstimateModel cannot be marked as completed, this method will raise an EstimateModelValidationError.
-            Otherwise, it will just return. Default is True.
         """
         if not self.can_complete():
             if raise_exception:
@@ -948,9 +959,6 @@ class EstimateModelAbstract(CreateUpdateMixIn,
             Commits transaction into current EstimateModel instance.
         date_canceled: date
             Optional date when EstimateModel instance is canceled. Defaults to localdate().
-        raise_exception: bool, Optional
-            If the EstimateModel cannot be marked as canceled, this method will raise an EstimateModelValidationError.
-            Otherwise, it will just return. Default is True.
         """
         if not self.can_cancel():
             if raise_exception:
@@ -1027,9 +1035,6 @@ class EstimateModelAbstract(CreateUpdateMixIn,
             Commits transaction into current EstimateModel instance.
         date_void: date
             Optional date when EstimateModel instance is void. Defaults to localdate().
-        raise_exception: bool, Optional
-            If the EstimateModel cannot be marked as void, this method will raise an EstimateModelValidationError.
-            Otherwise, it will just return. Default is True.
         """
         if not self.can_void():
             if raise_exception:
@@ -1100,10 +1105,9 @@ class EstimateModelAbstract(CreateUpdateMixIn,
     def can_migrate_itemtxs(self) -> bool:
         return self.is_draft()
 
-    def migrate_itemtxs(self, itemtxs: Dict, operation: str, commit: bool = False) -> Union[
-        List[ItemTransactionModel], ItemTransactionModelQuerySet]:
+    def migrate_itemtxs(self, itemtxs: Dict, operation: str, commit: bool = False):
         itemtxs_batch = super().migrate_itemtxs(itemtxs=itemtxs, commit=commit, operation=operation)
-        self.update_state(batch=itemtxs_batch)
+        self.update_state(itemtxs_qs=itemtxs_batch)
         self.clean()
 
         if commit:
@@ -1123,51 +1127,45 @@ class EstimateModelAbstract(CreateUpdateMixIn,
             entity_id__exact=self.entity_id
         ).estimates()
 
-    def validate_itemtxs_batch(self, batch: Union[ItemTransactionModelQuerySet, List[ItemTransactionModel]]):
+    def validate_itemtxs_qs(self, queryset: Union[ItemTransactionModelQuerySet, List[ItemTransactionModel]]):
         """
         Validates that the entire ItemTransactionModelQuerySet is bound to the EstimateModel.
 
         Parameters
         ----------
-        batch: ItemTransactionModelQuerySet or list of ItemTransactionModel.
+        queryset: ItemTransactionModelQuerySet or list of ItemTransactionModel.
             ItemTransactionModelQuerySet to validate.
         """
         valid = all([
-            i.ce_model_id == self.uuid for i in batch
+            i.ce_model_id == self.uuid for i in queryset
         ])
         if not valid:
             raise EstimateModelValidationError(f'Invalid queryset. All items must be assigned to Bill {self.uuid}')
 
     def get_itemtxs_data(self,
-                         batch: Optional[Union[ItemTransactionModelQuerySet, List[ItemTransactionModel]]] = None,
+                         queryset: Optional[Union[ItemTransactionModelQuerySet, List[ItemTransactionModel]]] = None,
                          aggregate_on_db: bool = False,
-                         lazy_agg: bool = False) -> tuple[
-        ItemTransactionModelQuerySet | list[ItemTransactionModel] | Any, None]:
+                         lazy_agg: bool = False):
 
         """
         Returns all ItemTransactionModels associated with the EstimateModel and a total aggregate.
 
         Parameters
         ----------
-        batch: List[ItemTransactionModel] or ItemTransactionModelQuerySet
+        queryset: ItemTransactionModelQuerySet
             ItemTransactionModelQuerySet to use. Avoids additional DB query if provided.
             Validated if provided.
-        aggregate_on_db: bool
-            If True, performs aggregation at the DB layer. Defaults to False.
-        lazy_agg: bool
-            If True, performs queryset aggregation metrics. Defaults to False.        Returns
 
         Returns
         -------
-        A tuple: ItemTransactionModelQuerySet or list of ItemTransactionModels, then aggregation metrics dict (None)
+        ItemTransactionModelQuerySet
         """
-        if not batch:
-            # noinspection PyUnresolvedReferences
-            batch = self.itemtransactionmodel_set.select_related('item_model').all()
+        if not queryset:
+            queryset = self.itemtransactionmodel_set.select_related('item_model').all()
         else:
-            self.validate_item_transaction_batch(batch)
+            self.validate_item_transaction_qs(queryset)
         # todo: this needs to return an aggregate for consistency...
-        return batch, None
+        return queryset, None
 
     # ### ItemizeMixIn implementation END...
     def get_itemtxs_annotation(self, itemtxs_qs: Optional[ItemTransactionModelQuerySet] = None):
@@ -1203,22 +1201,21 @@ class EstimateModelAbstract(CreateUpdateMixIn,
             )
         )
 
-    def update_revenue_estimate(self, itemtxs_batch: Optional[
-        Union[List[ItemTransactionModel], ItemTransactionModelQuerySet]] = None, commit: bool = False):
+    def update_revenue_estimate(self, itemtxs_qs: Optional[ItemTransactionModelQuerySet] = None, commit: bool = False):
         """
         Updates the revenue estimate of the EstimateModel instance.
 
         Parameters
         ----------
-        itemtxs_batch: List[ItemTransactionModel] or ItemTransactionModelQuerySet
+        itemtxs_qs: ItemTransactionModelQuerySet
             Prefetched ItemTransactionModelQuerySet. A new ItemTransactionModelQuerySet will be fetched from DB if not
             provided. If provided will be validated.
 
         commit: bool
             If True, the new revenue estimate will be committed into the DB.
         """
-        itemtxs_batch, _ = self.get_itemtxs_data(itemtxs_batch)
-        self.revenue_estimate = sum(i.ce_revenue_estimate for i in itemtxs_batch)
+        itemtxs_qs, _ = self.get_itemtxs_data(itemtxs_qs)
+        self.revenue_estimate = sum(i.ce_revenue_estimate for i in itemtxs_qs)
 
         if commit:
             self.save(update_fields=[
@@ -1226,26 +1223,25 @@ class EstimateModelAbstract(CreateUpdateMixIn,
                 'updated'
             ])
 
-    def update_cost_estimate(self, itemtxs_batch: Optional[
-        Union[List[ItemTransactionModel], ItemTransactionModelQuerySet]] = None, commit: bool = False):
+    def update_cost_estimate(self, itemtxs_qs: Optional[ItemTransactionModelQuerySet] = None, commit: bool = False):
         """
         Updates the cost estimate of the EstimateModel instance.
 
         Parameters
         ----------
-        itemtxs_batch: List[ItemTransactionModel] or ItemTransactionModelQuerySet
+        itemtxs_qs: ItemTransactionModelQuerySet
             Prefetched ItemTransactionModelQuerySet. A new ItemTransactionModelQuerySet will be fetched from DB if not
             provided. If provided will be validated.
         commit: bool
             If True, the new revenue estimate will be committed into the DB.
         """
-        itemtxs_batch, _ = self.get_itemtxs_data(batch=itemtxs_batch)
+        itemtxs_qs, _ = self.get_itemtxs_data(queryset=itemtxs_qs)
         estimates = {
-            'labor': sum(a.ce_cost_estimate for a in itemtxs_batch if a.item_model.is_labor()),
-            'material': sum(a.ce_cost_estimate for a in itemtxs_batch if a.item_model.is_material()),
-            'equipment': sum(a.ce_cost_estimate for a in itemtxs_batch if a.item_model.is_equipment()),
+            'labor': sum(a.ce_cost_estimate for a in itemtxs_qs if a.item_model.is_labor()),
+            'material': sum(a.ce_cost_estimate for a in itemtxs_qs if a.item_model.is_material()),
+            'equipment': sum(a.ce_cost_estimate for a in itemtxs_qs if a.item_model.is_equipment()),
             'other': sum(
-                a.ce_cost_estimate for a in itemtxs_batch
+                a.ce_cost_estimate for a in itemtxs_qs
                 if
                 a.item_model.is_other() or not a.item_model_id or not a.item_model.item_type or a.item_model.is_lump_sum()
             ),
@@ -1265,10 +1261,10 @@ class EstimateModelAbstract(CreateUpdateMixIn,
             ])
 
     def update_state(self,
-                     batch: Optional[Union[ItemTransactionModelQuerySet, List[ItemTransactionModel]]] = None):
-        batch, _ = self.get_itemtxs_data(batch=batch)
-        self.update_cost_estimate(batch)
-        self.update_revenue_estimate(batch)
+                     itemtxs_qs: Optional[Union[ItemTransactionModelQuerySet, List[ItemTransactionModel]]] = None):
+        itemtxs_qs, _ = self.get_itemtxs_data(queryset=itemtxs_qs)
+        self.update_cost_estimate(itemtxs_qs)
+        self.update_revenue_estimate(itemtxs_qs)
 
     # Features...
     def get_cost_estimate(self, as_float: bool = False) -> Union[float, Decimal]:
@@ -1352,7 +1348,7 @@ class EstimateModelAbstract(CreateUpdateMixIn,
             if as_percent:
                 return gm * 100
             return gm
-        except ZeroDivisionError:
+        except ZeroDivisionError as e:
             if raise_exception:
                 raise EstimateModelValidationError(message=_('Cannot compute gross margin, total cost is zero.'))
             return 0.00
@@ -1377,24 +1373,24 @@ class EstimateModelAbstract(CreateUpdateMixIn,
     # --- CONTRACT METHODS ---
 
     # Queryset validation....
-    def validate_item_transaction_batch(self, batch: Union[ItemTransactionModelQuerySet, List[ItemTransactionModel]]):
+    def validate_item_transaction_qs(self, itemtxs_qs: Union[ItemTransactionModelQuerySet, List[ItemTransactionModel]]):
         """
         Validates that the entire ItemTransactionModelQuerySet is bound to the BillModel.
 
         Parameters
         ----------
-        batch: ItemTransactionModelQuerySet
+        itemtxs_qs: ItemTransactionModelQuerySet
             ItemTransactionModelQuerySet to validate.
         """
-        if not isinstance(batch, ItemTransactionModelQuerySet):
+        if not isinstance(itemtxs_qs, ItemTransactionModelQuerySet):
             if not all([
-                isinstance(i, ItemTransactionModel) for i in batch
+                isinstance(i, ItemTransactionModel) for i in itemtxs_qs
             ]):
                 raise EstimateModelValidationError(
                     message='Must pass an instance of ItemTransactionModelQuerySet or a list of ItemTransactionModel'
                 )
         valid = all([
-            i.ce_model_id == self.uuid for i in batch
+            i.ce_model_id == self.uuid for i in itemtxs_qs
         ])
         if not valid:
             raise EstimateModelValidationError(f'Invalid queryset. All items must be assigned to Estimate {self.uuid}')
@@ -1467,7 +1463,6 @@ class EstimateModelAbstract(CreateUpdateMixIn,
 
     def get_po_amount(self, po_qs: PurchaseOrderModelQuerySet = None) -> dict:
         if not po_qs:
-            # noinspection PyUnresolvedReferences
             po_qs = self.purchaseordermodel_set.all().active()
         else:
             po_qs = self.validate_po_queryset(po_qs=po_qs)
@@ -1476,7 +1471,6 @@ class EstimateModelAbstract(CreateUpdateMixIn,
 
     def get_billed_amount(self, bill_qs: Optional[BillModelQuerySet] = None) -> dict:
         if not bill_qs:
-            # noinspection PyUnresolvedReferences
             bill_qs = self.billmodel_set.all().active()
         else:
             bill_qs = self.validate_bill_queryset(bill_qs=bill_qs)
@@ -1491,7 +1485,6 @@ class EstimateModelAbstract(CreateUpdateMixIn,
 
     def get_invoiced_amount(self, invoice_qs: Optional[InvoiceModelQuerySet] = None) -> dict:
         if not invoice_qs:
-            # noinspection PyUnresolvedReferences
             invoice_qs = self.invoicemodel_set.all().active()
         else:
             invoice_qs = self.validate_invoice_queryset(invoice_qs=invoice_qs)
@@ -1539,7 +1532,7 @@ class EstimateModelAbstract(CreateUpdateMixIn,
         invoice_status = self.get_invoiced_amount(invoice_qs)
         return stats | po_status | billing_status | invoice_status
 
-    def _get_next_state_model(self, raise_exception: bool = True) -> Union['EntityStateModel', None]:
+    def _get_next_state_model(self, raise_exception: bool = True):
         """
         Fetches the next sequenced state model associated with the EstimateModel number.
 
@@ -1588,7 +1581,6 @@ class EstimateModelAbstract(CreateUpdateMixIn,
         except IntegrityError as e:
             if raise_exception:
                 raise e
-            return None
 
     def generate_estimate_number(self, commit: bool = False) -> str:
         """

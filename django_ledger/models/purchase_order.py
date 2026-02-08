@@ -12,10 +12,11 @@ starts in draft model by default and goes through different states including InR
 Void. The PurchaseOrderModel also keeps track of when these states take place.
 
 """
+import warnings
 from datetime import date
 from string import ascii_uppercase, digits
 from typing import Tuple, List, Union, Optional, Dict
-from uuid import uuid4
+from uuid import uuid4, UUID
 
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError, ObjectDoesNotExist
@@ -28,9 +29,10 @@ from django.shortcuts import get_object_or_404
 from django.urls import reverse
 from django.utils.translation import gettext_lazy as _
 
-from django_ledger.io.utils import get_localdate
+from django_ledger.io.io_core import get_localdate
 from django_ledger.models.bill import BillModel, BillModelQuerySet
-from django_ledger.models.entity import EntityModel, EntityStateModel
+from django_ledger.models.deprecations import deprecated_entity_slug_behavior
+from django_ledger.models.entity import EntityModel
 from django_ledger.models.items import ItemTransactionModel, ItemTransactionModelQuerySet, ItemModelQuerySet, ItemModel
 from django_ledger.models.mixins import CreateUpdateMixIn, MarkdownNotesMixIn, ItemizeMixIn
 from django_ledger.models.signals import (
@@ -42,7 +44,8 @@ from django_ledger.models.signals import (
     po_status_in_review
 )
 from django_ledger.models.utils import lazy_loader
-from django_ledger.settings import DJANGO_LEDGER_DOCUMENT_NUMBER_PADDING, DJANGO_LEDGER_PO_NUMBER_PREFIX
+from django_ledger.settings import DJANGO_LEDGER_DOCUMENT_NUMBER_PADDING, DJANGO_LEDGER_PO_NUMBER_PREFIX, \
+    DJANGO_LEDGER_USE_DEPRECATED_BEHAVIOR
 
 PO_NUMBER_CHARS = ascii_uppercase + digits
 
@@ -55,8 +58,16 @@ class PurchaseOrderModelValidationError(ValidationError):
 
 class PurchaseOrderModelQuerySet(QuerySet):
     """
-    A custom defined PurchaseOrderModel QuerySet.
+    A custom-defined PurchaseOrderModel QuerySet.
     """
+
+    def for_user(self, user_model):
+        if user_model.is_superuser:
+            return self
+        return self.filter(
+            Q(entity__admin=user_model) |
+            Q(entity__managers__in=[user_model])
+        )
 
     def approved(self):
         """
@@ -105,16 +116,8 @@ class PurchaseOrderModelManager(Manager):
     A custom defined PurchaseOrderModel Manager.
     """
 
-    def for_user(self, user_model):
-        qs = self.get_queryset()
-        if user_model.is_superuser:
-            return qs
-        return qs.filter(
-            Q(entity__admin=user_model) |
-            Q(entity__managers__in=[user_model])
-        )
-
-    def for_entity(self, entity_slug, user_model) -> PurchaseOrderModelQuerySet:
+    @deprecated_entity_slug_behavior
+    def for_entity(self, entity_model: EntityModel | str | UUID = None, **kwargs) -> PurchaseOrderModelQuerySet:
         """
         Fetches a QuerySet of PurchaseOrderModel associated with a specific EntityModel & UserModel.
         May pass an instance of EntityModel or a String representing the EntityModel slug.
@@ -124,10 +127,29 @@ class PurchaseOrderModelManager(Manager):
         PurchaseOrderModelQuerySet
             A PurchaseOrderModelQuerySet with applied filters.
         """
-        qs = self.for_user(user_model)
-        if isinstance(entity_slug, EntityModel):
-            qs = qs.filter(entity=entity_slug)
-        return qs.filter(entity__slug__exact=entity_slug)
+
+        qs = self.get_queryset()
+        if 'user_model' in kwargs:
+            warnings.warn(
+                'user_model parameter is deprecated and will be removed in a future release. '
+                'Use for_user(user_model).for_entity(entity_model) instead to keep current behavior.',
+                DeprecationWarning,
+                stacklevel=2
+            )
+            if DJANGO_LEDGER_USE_DEPRECATED_BEHAVIOR:
+                qs = qs.for_user(kwargs['user_model'])
+
+        if isinstance(entity_model, EntityModel):
+            qs = qs.filter(entity=entity_model)
+        elif isinstance(entity_model, str):
+            qs = qs.filter(entity__slug__exact=entity_model)
+        elif isinstance(entity_model, UUID):
+            qs = qs.filter(entity_id=entity_model)
+        else:
+            raise PurchaseOrderModelValidationError(
+                message='Entity slug must be either an EntityModel or a String representing the EntityModel slug',
+            )
+        return qs
 
 
 class PurchaseOrderModelAbstract(CreateUpdateMixIn,
@@ -335,17 +357,17 @@ class PurchaseOrderModelAbstract(CreateUpdateMixIn,
                 self.save()
         return self
 
-    def validate_item_transaction_batch(self, batch: Union[ItemTransactionModelQuerySet, List[ItemTransactionModel]]):
+    def validate_item_transaction_qs(self, queryset: Union[ItemTransactionModelQuerySet, List[ItemTransactionModel]]):
         """
         Validates that the entire ItemTransactionModelQuerySet is bound to the PurchaseOrderModel.
 
         Parameters
         ----------
-        batch: ItemTransactionModelQuerySet or list of ItemTransactionModel.
+        queryset: ItemTransactionModelQuerySet or list of ItemTransactionModel.
             ItemTransactionModelQuerySet to validate.
         """
         valid = all([
-            i.po_model_id == self.uuid for i in batch
+            i.po_model_id == self.uuid for i in queryset
         ])
         if not valid:
             raise PurchaseOrderModelValidationError(f'Invalid queryset. All items must be assigned to PO {self.uuid}')
@@ -355,10 +377,9 @@ class PurchaseOrderModelAbstract(CreateUpdateMixIn,
     def can_migrate_itemtxs(self) -> bool:
         return self.is_draft()
 
-    def migrate_itemtxs(self, itemtxs: Dict, operation: str, commit: bool = False) -> Union[
-        List[ItemTransactionModel], ItemTransactionModelQuerySet]:
+    def migrate_itemtxs(self, itemtxs: Dict, operation: str, commit: bool = False):
         itemtxs_batch = super().migrate_itemtxs(itemtxs=itemtxs, commit=commit, operation=operation)
-        self.update_state(batch=itemtxs_batch)
+        self.update_state(itemtxs_qs=itemtxs_batch)
         self.clean()
         if commit:
             self.save(update_fields=['po_amount',
@@ -372,46 +393,43 @@ class PurchaseOrderModelAbstract(CreateUpdateMixIn,
         ).purchase_orders()
 
     def get_itemtxs_data(self,
-                         batch: Optional[Union[ItemTransactionModelQuerySet, List[ItemTransactionModel]]] = None,
+                         queryset: Optional[Union[ItemTransactionModelQuerySet, List[ItemTransactionModel]]] = None,
                          aggregate_on_db: bool = False,
-                         lazy_agg: bool = False) -> Tuple[ItemTransactionModelQuerySet, Dict]:
+                         lazy_agg: bool = False) -> Tuple:
         """
         Fetches the PurchaseOrderModel Items and aggregates the QuerySet.
 
         Parameters
         ----------
-        batch: List[ItemTransactionModel] or ItemTransactionModelQuerySet
+        queryset: ItemTransactionModelQuerySet
             Optional pre-fetched ItemModelQueryset to use. Avoids additional DB query if provided.
             Validated if provided.
         aggregate_on_db: bool
             If True, performs aggregation of ItemsTransactions in the DB resulting in one additional DB query.
-        lazy_agg: bool
-            If True, performs queryset aggregation metrics. Defaults to False.
 
         Returns
         -------
-        A tuple: ItemTransactionModelQuerySet, aggregation metrics dict
+        A tuple: ItemTransactionModelQuerySet, dict
         """
-        if not batch:
-            # noinspection PyUnresolvedReferences
-            batch = self.itemtransactionmodel_set.all().select_related('bill_model', 'item_model')
+        if not queryset:
+            queryset = self.itemtransactionmodel_set.all().select_related('bill_model', 'item_model')
         else:
-            self.validate_item_transaction_batch(batch)
+            self.validate_item_transaction_qs(queryset)
 
-        if aggregate_on_db and isinstance(batch, ItemTransactionModelQuerySet):
-            return batch, batch.aggregate(
+        if aggregate_on_db and isinstance(queryset, ItemTransactionModelQuerySet):
+            return queryset, queryset.aggregate(
                 po_total_amount__sum=Coalesce(Sum('po_total_amount'), 0.0, output_field=models.FloatField()),
                 bill_amount_paid__sum=Coalesce(Sum('bill_model__amount_paid'), 0.0, output_field=models.FloatField()),
                 total_items=Count('uuid')
             )
-        return batch, {
-            'po_total_amount__sum': sum(i.total_amount for i in batch),
-            'bill_amount_paid__sum': sum(i.bill_model.amount_paid for i in batch if i.bill_model_id),
-            'total_items': len(batch)
+        return queryset, {
+            'po_total_amount__sum': sum(i.total_amount for i in queryset),
+            'bill_amount_paid__sum': sum(i.bill_model.amount_paid for i in queryset if i.bill_model_id),
+            'total_items': len(queryset)
         } if not lazy_agg else None
 
     # ### ItemizeMixIn implementation END...
-    def update_state(self, batch: Optional[
+    def update_state(self, itemtxs_qs: Optional[
         Union[ItemTransactionModelQuerySet, List[ItemTransactionModel]]] = None) -> Tuple:
 
         """
@@ -419,25 +437,25 @@ class PurchaseOrderModelAbstract(CreateUpdateMixIn,
 
         Parameters
         ----------
-        batch: ItemTransactionModelQuerySet or list of ItemTransactionModel
+        itemtxs_qs: ItemTransactionModelQuerySet or list of ItemTransactionModel
 
         Returns
         -------
         tuple
             A tuple of ItemTransactionModels and Aggregation
         """
-        batch, itemtxs_agg = self.get_itemtxs_data(batch=batch)
+        itemtxs_qs, itemtxs_agg = self.get_itemtxs_data(queryset=itemtxs_qs)
 
-        if isinstance(batch, list):
-            self.po_amount = round(sum(a.po_total_amount for a in batch if not a.is_canceled()), 2)
-            self.po_amount_received = round(sum(a.po_total_amount for a in batch if a.is_received()), 2)
-        elif isinstance(batch, ItemTransactionModelQuerySet):
-            total_po_amount = round(sum(i.po_total_amount for i in batch if not i.is_canceled()), 2)
-            total_received = round(sum(i.po_total_amount for i in batch if i.is_received()), 2)
+        if isinstance(itemtxs_qs, list):
+            self.po_amount = round(sum(a.po_total_amount for a in itemtxs_qs if not a.is_canceled()), 2)
+            self.po_amount_received = round(sum(a.po_total_amount for a in itemtxs_qs if a.is_received()), 2)
+        elif isinstance(itemtxs_qs, ItemTransactionModelQuerySet):
+            total_po_amount = round(sum(i.po_total_amount for i in itemtxs_qs if not i.is_canceled()), 2)
+            total_received = round(sum(i.po_total_amount for i in itemtxs_qs if i.is_received()), 2)
             self.po_amount = total_po_amount
             self.po_amount_received = total_received
 
-        return batch, itemtxs_agg
+        return itemtxs_qs, itemtxs_agg
 
     # State...
     def is_draft(self) -> bool:
@@ -837,7 +855,6 @@ class PurchaseOrderModelAbstract(CreateUpdateMixIn,
         self.po_status = self.PO_STATUS_APPROVED
         self.clean()
         if commit:
-            # noinspection PyUnresolvedReferences
             self.itemtransactionmodel_set.all().update(po_item_status=ItemTransactionModel.STATUS_NOT_ORDERED)
             self.save(update_fields=[
                 'date_approved',
@@ -977,7 +994,7 @@ class PurchaseOrderModelAbstract(CreateUpdateMixIn,
                 message=f'Purchase Order {self.po_number} cannot be marked as fulfilled.')
 
         if not po_items:
-            po_items, po_items_agg = self.get_itemtxs_data(batch=po_items)
+            po_items, po_items_agg = self.get_itemtxs_data(queryset=po_items)
 
         self.date_fulfilled = get_localdate() if not date_fulfilled else date_fulfilled
         self.po_amount_received = self.po_amount
@@ -1081,7 +1098,7 @@ class PurchaseOrderModelAbstract(CreateUpdateMixIn,
 
         if commit:
             self.save(update_fields=[
-                'date_void',
+                'void_date',
                 'po_status',
                 'updated'
             ])
@@ -1148,7 +1165,7 @@ class PurchaseOrderModelAbstract(CreateUpdateMixIn,
         """
         return getattr(self, f'date_{self.po_status}')
 
-    def _get_next_state_model(self, raise_exception: bool = True) -> Optional[EntityStateModel]:
+    def _get_next_state_model(self, raise_exception: bool = True):
         """
         Fetches the next sequenced state model associated with the PurchaseOrderModel number.
 
@@ -1162,8 +1179,7 @@ class PurchaseOrderModelAbstract(CreateUpdateMixIn,
         EntityStateModel
             An instance of EntityStateModel
         """
-        _EntityStateModel = lazy_loader.get_entity_state_model()
-        # noinspection PyShadowingNames
+        EntityStateModel = lazy_loader.get_entity_state_model()
         EntityModel = lazy_loader.get_entity_model()
         entity_model = EntityModel.objects.get(uuid__exact=self.entity_id)
         fy_key = entity_model.get_fy_for_date(dt=self.date_draft)
@@ -1172,10 +1188,10 @@ class PurchaseOrderModelAbstract(CreateUpdateMixIn,
                 'entity_model_id__exact': self.entity_id,
                 'entity_unit_id': None,
                 'fiscal_year': fy_key,
-                'key__exact': _EntityStateModel.KEY_PURCHASE_ORDER
+                'key__exact': EntityStateModel.KEY_PURCHASE_ORDER
             }
 
-            state_model_qs = _EntityStateModel.objects.filter(**LOOKUP).select_related(
+            state_model_qs = EntityStateModel.objects.filter(**LOOKUP).select_related(
                 'entity_model').select_for_update()
             state_model = state_model_qs.get()
             state_model.sequence = F('sequence') + 1
@@ -1183,7 +1199,6 @@ class PurchaseOrderModelAbstract(CreateUpdateMixIn,
             state_model.refresh_from_db()
             return state_model
         except ObjectDoesNotExist:
-            # noinspection PyShadowingNames
             EntityModel = lazy_loader.get_entity_model()
             entity_model = EntityModel.objects.get(uuid__exact=self.entity_id)
             fy_key = entity_model.get_fy_for_date(dt=self.date_draft)
@@ -1192,15 +1207,14 @@ class PurchaseOrderModelAbstract(CreateUpdateMixIn,
                 'entity_model_id': entity_model.uuid,
                 'entity_unit_id': None,
                 'fiscal_year': fy_key,
-                'key': _EntityStateModel.KEY_PURCHASE_ORDER,
+                'key': EntityStateModel.KEY_PURCHASE_ORDER,
                 'sequence': 1
             }
-            state_model = _EntityStateModel.objects.create(**LOOKUP)
+            state_model = EntityStateModel.objects.create(**LOOKUP)
             return state_model
         except IntegrityError as e:
             if raise_exception:
                 raise e
-            return None
 
     def generate_po_number(self, commit: bool = False) -> str:
         """
@@ -1245,7 +1259,6 @@ class PurchaseOrderModel(PurchaseOrderModelAbstract):
         abstract = False
 
 
-# noinspection PyUnusedLocal
 def purchaseordermodel_presave(instance: PurchaseOrderModel, **kwargs):
     if instance.can_generate_po_number():
         instance.generate_po_number(commit=False)

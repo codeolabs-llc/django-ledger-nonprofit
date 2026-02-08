@@ -25,16 +25,17 @@ The JournalEntryModel is also responsible for validating the Financial Activity 
 business. Whenever an account with ASSET_CA_CASH role is involved in a Journal Entry (see roles for more details), the
 JE is responsible for programmatically determine the kind of operation for the JE (Operating, Financing, Investing).
 """
+import warnings
 from datetime import date, datetime
 from decimal import Decimal
 from enum import Enum
 from itertools import chain
-from typing import Set, Union, Optional, Dict, Tuple, List, TypeVar, Generic
-from uuid import uuid4, UUID
+from typing import Dict, List, Optional, Set, Tuple, Union
+from uuid import UUID, uuid4
 
 from django.core.exceptions import FieldError, ObjectDoesNotExist, ValidationError
-from django.db import models, transaction, IntegrityError
-from django.db.models import Q, Sum, QuerySet, F, Manager, Count
+from django.db import IntegrityError, models, transaction
+from django.db.models import Count, F, Manager, Q, QuerySet, Sum
 from django.db.models.functions import Coalesce
 from django.db.models.signals import pre_save
 from django.urls import reverse
@@ -42,39 +43,43 @@ from django.utils.timezone import localtime
 from django.utils.translation import gettext_lazy as _
 
 from django_ledger.io import roles
-from django_ledger.io.utils import get_localtime
+from django_ledger.io.io_core import get_localtime
 from django_ledger.io.roles import (
-    ASSET_CA_CASH, GROUP_CFS_FIN_DIVIDENDS, GROUP_CFS_FIN_ISSUING_EQUITY,
-    GROUP_CFS_FIN_LT_DEBT_PAYMENTS, GROUP_CFS_FIN_ST_DEBT_PAYMENTS,
-    GROUP_CFS_INVESTING_AND_FINANCING, GROUP_CFS_INVESTING_PPE,
+    ASSET_CA_CASH,
+    GROUP_CFS_FIN_DIVIDENDS,
+    GROUP_CFS_FIN_ISSUING_EQUITY,
+    GROUP_CFS_FIN_LT_DEBT_PAYMENTS,
+    GROUP_CFS_FIN_ST_DEBT_PAYMENTS,
+    GROUP_CFS_INVESTING_AND_FINANCING,
+    GROUP_CFS_INVESTING_PPE,
     GROUP_CFS_INVESTING_SECURITIES,
-    validate_roles
+    validate_roles,
 )
 from django_ledger.models.accounts import CREDIT, DEBIT
-from django_ledger.models.entity import EntityStateModel, EntityModel
+from django_ledger.models.deprecations import deprecated_entity_slug_behavior
+from django_ledger.models.entity import EntityModel, EntityStateModel
 from django_ledger.models.ledger import LedgerModel
 from django_ledger.models.mixins import CreateUpdateMixIn
 from django_ledger.models.signals import (
-    journal_entry_unlocked,
     journal_entry_locked,
     journal_entry_posted,
-    journal_entry_unposted
+    journal_entry_unlocked,
+    journal_entry_unposted,
 )
 from django_ledger.models.transactions import TransactionModelQuerySet
 from django_ledger.settings import (
-    DJANGO_LEDGER_JE_NUMBER_PREFIX,
     DJANGO_LEDGER_DOCUMENT_NUMBER_PADDING,
-    DJANGO_LEDGER_JE_NUMBER_NO_UNIT_PREFIX
+    DJANGO_LEDGER_JE_NUMBER_NO_UNIT_PREFIX,
+    DJANGO_LEDGER_JE_NUMBER_PREFIX,
+    DJANGO_LEDGER_USE_DEPRECATED_BEHAVIOR,
 )
 
 
 class JournalEntryValidationError(ValidationError):
     pass
 
-T = TypeVar('T', bound='JournalEntry')
-QS = TypeVar('QS', bound='JournalEntryQuerySet')
 
-class JournalEntryModelQuerySet(QuerySet[T], Generic[T]):
+class JournalEntryModelQuerySet(QuerySet):
     """
     A custom QuerySet for working with Journal Entry models, providing additional
     convenience methods and validations for specific use cases.
@@ -84,7 +89,33 @@ class JournalEntryModelQuerySet(QuerySet[T], Generic[T]):
     locked entries, and querying entries associated with specific ledgers.
     """
 
-    def create(self: QS, verify_on_save: bool = False, force_create: bool = False, **kwargs) -> T:
+    def for_user(self, user_model) -> 'JournalEntryModelQuerySet':
+        """
+        Filters the JournalEntryModel queryset for the given user.
+
+        - Superusers will have access to all journal entries.
+        - Other authenticated users will only see entries for entities where
+          they are admins or managers.
+
+        Parameters
+        ----------
+        user_model : UserModel
+            An authenticated Django user object.
+
+        Returns
+        -------
+        JournalEntryModelQuerySet
+            A filtered queryset restricted by the user's entity relationships.
+        """
+        if user_model.is_superuser:
+            return self
+
+        return self.filter(
+            Q(ledger__entity__admin=user_model) |  # Entries for entities where the user is admin
+            Q(ledger__entity__managers__in=[user_model])  # Entries for entities where the user is a manager
+        )
+
+    def create(self, verify_on_save: bool = False, force_create: bool = False, **kwargs) -> 'JournalEntryModelQuerySet':
         """
         Creates a new Journal Entry while enforcing business logic validations.
 
@@ -126,24 +157,7 @@ class JournalEntryModelQuerySet(QuerySet[T], Generic[T]):
         obj.save(force_insert=True, using=self.db, verify=verify_on_save)
         return obj
 
-    # override a couple methods to get type checking working
-    def filter(self: QS, *args, **kwargs) -> QS:
-        # noinspection PyTypeChecker
-        return super().filter(*args, **kwargs)
-
-    def order_by(self: QS, *field_names) -> QS:
-        # noinspection PyTypeChecker
-        return super().order_by(*field_names)
-
-    def select_related(self: QS, *fields) -> QS:
-        # noinspection PyTypeChecker
-        return super().select_related(*fields)
-
-    def annotate(self: QS, *args, **kwargs) -> QS:
-        # noinspection PyTypeChecker
-        return super().annotate(*args, **kwargs)
-
-    def posted(self):
+    def posted(self) -> 'JournalEntryModelQuerySet':
         """
         Filters the QuerySet to include only "posted" Journal Entries.
 
@@ -154,7 +168,7 @@ class JournalEntryModelQuerySet(QuerySet[T], Generic[T]):
         """
         return self.filter(posted=True)
 
-    def unposted(self):
+    def unposted(self) -> 'JournalEntryModelQuerySet':
         """
         Filters the QuerySet to include only "unposted" Journal Entries.
 
@@ -165,7 +179,7 @@ class JournalEntryModelQuerySet(QuerySet[T], Generic[T]):
         """
         return self.filter(posted=False)
 
-    def locked(self):
+    def locked(self) -> 'JournalEntryModelQuerySet':
         """
         Filters the QuerySet to include only "locked" Journal Entries.
 
@@ -176,7 +190,7 @@ class JournalEntryModelQuerySet(QuerySet[T], Generic[T]):
         """
         return self.filter(locked=True)
 
-    def unlocked(self):
+    def unlocked(self) -> 'JournalEntryModelQuerySet':
         """
         Filters the QuerySet to include only "unlocked" Journal Entries.
 
@@ -187,7 +201,7 @@ class JournalEntryModelQuerySet(QuerySet[T], Generic[T]):
         """
         return self.filter(locked=False)
 
-    def for_ledger(self, ledger_pk: Union[str, UUID, LedgerModel]):
+    def for_ledger(self, ledger_pk: Union[str, UUID, LedgerModel]) -> 'JournalEntryModelQuerySet':
         """
         Filters the QuerySet to include Journal Entries associated with a specific Ledger.
 
@@ -218,7 +232,7 @@ class JournalEntryModelManager(Manager):
     annotations for convenience in query results.
     """
 
-    def get_queryset(self):
+    def get_queryset(self) -> JournalEntryModelQuerySet:
         """
         Returns the default queryset for JournalEntryModel with additional
         annotations applied.
@@ -242,34 +256,8 @@ class JournalEntryModelManager(Manager):
             txs_count=Count('transactionmodel')  # Annotates the count of transactions
         )
 
-    def for_user(self, user_model):
-        """
-        Filters the JournalEntryModel queryset for the given user.
-
-        - Superusers will have access to all journal entries.
-        - Other authenticated users will only see entries for entities where
-          they are admins or managers.
-
-        Parameters
-        ----------
-        user_model : UserModel
-            An authenticated Django user object.
-
-        Returns
-        -------
-        JournalEntryModelQuerySet
-            A filtered queryset restricted by the user's entity relationships.
-        """
-        qs = self.get_queryset()
-        if user_model.is_superuser:
-            return qs
-
-        return qs.filter(
-            Q(ledger__entity__admin=user_model) |  # Entries for entities where the user is admin
-            Q(ledger__entity__managers__in=[user_model])  # Entries for entities where the user is a manager
-        )
-
-    def for_entity(self, entity_slug: Union[str, EntityModel], user_model):
+    @deprecated_entity_slug_behavior
+    def for_entity(self, entity_model: EntityModel | str | UUID = None, **kwargs) -> JournalEntryModelQuerySet:
         """
         Filters the JournalEntryModel queryset for a specific entity and user.
 
@@ -279,24 +267,36 @@ class JournalEntryModelManager(Manager):
 
         Parameters
         ----------
-        entity_slug : str or EntityModel
+        entity_model : str or EntityModel
             The slug of the entity (or an instance of `EntityModel`) used for filtering.
-        user_model : UserModel
-            An authenticated Django user object.
-
         Returns
         -------
         JournalEntryModelQuerySet
             A customized queryset containing journal entries associated with the
             given entity and restricted by the user's access permissions.
         """
-        qs = self.for_user(user_model)
+        qs = self.get_queryset()
+        if 'user_model' in kwargs:
+            warnings.warn(
+                'user_model parameter is deprecated and will be removed in a future release. '
+                'Use for_user(user_model).for_entity(entity_model) instead to keep current behavior.',
+                DeprecationWarning,
+                stacklevel=2
+            )
+            if DJANGO_LEDGER_USE_DEPRECATED_BEHAVIOR:
+                qs = qs.for_user(kwargs['user_model'])
 
-        # Handle the `entity_slug` as either a string or an EntityModel instance
-        if isinstance(entity_slug, EntityModel):
-            return qs.filter(ledger__entity=entity_slug)
-
-        return qs.filter(ledger__entity__slug__iexact=entity_slug)  # Case-insensitive slug match
+        if isinstance(entity_model, EntityModel):
+            qs = qs.filter(ledger__entity=entity_model)
+        elif isinstance(entity_model, str):
+            qs = qs.filter(ledger__entity__slug__exact=entity_model)
+        elif isinstance(entity_model, UUID):
+            qs = qs.filter(ledger__entity_id=entity_model)
+        else:
+            raise JournalEntryValidationError(
+                message='Must provide EntityModel, slug or UUID',
+            )
+        return qs
 
 
 class ActivityEnum(Enum):
@@ -390,7 +390,7 @@ class JournalEntryModelAbstract(CreateUpdateMixIn):
     uuid = models.UUIDField(default=uuid4, editable=False, primary_key=True)
     je_number = models.SlugField(max_length=25, editable=False, verbose_name=_('Journal Entry Number'))
     timestamp = models.DateTimeField(verbose_name=_('Timestamp'), default=localtime)
-    description = models.CharField(max_length=70, blank=True, null=True, verbose_name=_('Description'))
+    description = models.CharField(max_length=120, blank=True, null=True, verbose_name=_('Description'))
     entity_unit = models.ForeignKey(
         'django_ledger.EntityUnitModel',
         on_delete=models.RESTRICT,
@@ -514,9 +514,6 @@ class JournalEntryModelAbstract(CreateUpdateMixIn):
         entity_model : Union[EntityModel, str, UUID]
             The entity to validate against. It can either be an instance of the
             `EntityModel`, a string representation of a UUID, or a UUID object.
-        raise_exception : bool, Optional
-            If `True`, raises an exception if the validation fails.
-            Otherwise, it just returns False.  Default is True (to raise the exception).
 
         Returns
         -------
@@ -686,15 +683,12 @@ class JournalEntryModelAbstract(CreateUpdateMixIn):
             return is_valid
         return True
 
-    @staticmethod
-    def is_txs_qs_coa_valid(txs_qs: TransactionModelQuerySet, raise_exception: bool = True) -> bool:
+    def is_txs_qs_coa_valid(self, txs_qs: TransactionModelQuerySet, raise_exception: bool = True) -> bool:
         """
         Validates that all transactions in the QuerySet are associated with the same Chart of Accounts (COA).
 
         Parameters:
             txs_qs (TransactionModelQuerySet): A QuerySet containing transactions to validate.
-            raise_exception (bool): Whether to raise a JournalEntryValidationError if the validation fails.
-                Otherwise, it just returns False.  Default is True (raise the exception).
 
         Returns:
             bool: True if all transactions have the same Chart of Accounts, otherwise False.
@@ -997,9 +991,9 @@ class JournalEntryModelAbstract(CreateUpdateMixIn):
             A queryset containing transactions related to this journal entry. If `select_accounts` is
             True, the accounts are included in the query as well.
         """
-        # noinspection PyUnresolvedReferences
-        qs = self.transactionmodel_set.all()
-        return qs.select_related('account') if select_accounts else qs
+        if select_accounts:
+            return self.transactionmodel_set.all().select_related('account')
+        return self.transactionmodel_set.all()
 
     def get_txs_balances(
             self,
@@ -1079,7 +1073,6 @@ class JournalEntryModelAbstract(CreateUpdateMixIn):
         else:
             self.is_txs_qs_valid(txs_qs)
 
-        # noinspection PyShadowingNames
         roles = {tx.account.role for tx in txs_qs}
 
         if exclude_cash_role:
@@ -1158,7 +1151,7 @@ class JournalEntryModelAbstract(CreateUpdateMixIn):
 
         # no roles involved
         if not len(role_set):
-            return None
+            return
 
         # determining if investing....
         is_investing_for_ppe = all([
@@ -1324,7 +1317,6 @@ class JournalEntryModelAbstract(CreateUpdateMixIn):
         except IntegrityError as e:
             if raise_exception:
                 raise e
-            return None
 
     def can_generate_je_number(self) -> bool:
         """
@@ -1378,7 +1370,8 @@ class JournalEntryModelAbstract(CreateUpdateMixIn):
     def verify(self,
                txs_qs: Optional[TransactionModelQuerySet] = None,
                force_verify: bool = False,
-               raise_exception: bool = True) -> Tuple[TransactionModelQuerySet, bool]:
+               raise_exception: bool = True,
+               **kwargs) -> Tuple[TransactionModelQuerySet, bool]:
 
         """
         Verifies the validity of the Journal Entry model instance.
@@ -1391,6 +1384,8 @@ class JournalEntryModelAbstract(CreateUpdateMixIn):
             Forces re-verification even if already verified.
         raise_exception : bool, default True
             Determines if exceptions are raised on validation failure.
+        kwargs : dict
+            Additional options.
 
         Returns
         -------
@@ -1792,9 +1787,7 @@ class JournalEntryModel(JournalEntryModelAbstract):
         abstract = False
 
 
-# noinspection PyUnusedLocal
 def journalentrymodel_presave(instance: JournalEntryModel, **kwargs):
-    # noinspection PyProtectedMember
     if instance._state.adding:
         # cannot add journal entries to a locked ledger...
         if instance.ledger_is_locked():

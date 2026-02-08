@@ -20,30 +20,32 @@ from django_ledger.settings import DJANGO_LEDGER_FORM_INPUT_CLASSES
 class TransactionModelForm(ModelForm):
     class Meta:
         model = TransactionModel
-        fields = [
-            'account',
-            'tx_type',
-            'amount',
-            'description'
-        ]
+        fields = ['account', 'tx_type', 'amount', 'description']
         widgets = {
-            'account': Select(attrs={
-                'class': DJANGO_LEDGER_FORM_INPUT_CLASSES + ' is-small',
-            }),
-            'tx_type': Select(attrs={
-                'class': DJANGO_LEDGER_FORM_INPUT_CLASSES + ' is-small',
-            }),
-            'amount': TextInput(attrs={
-                'class': DJANGO_LEDGER_FORM_INPUT_CLASSES + ' is-small',
-            }),
-            'description': TextInput(attrs={
-                'class': DJANGO_LEDGER_FORM_INPUT_CLASSES + ' is-small',
-            }),
+            'account': Select(
+                attrs={
+                    'class': DJANGO_LEDGER_FORM_INPUT_CLASSES + ' is-small',
+                }
+            ),
+            'tx_type': Select(
+                attrs={
+                    'class': DJANGO_LEDGER_FORM_INPUT_CLASSES + ' is-small',
+                }
+            ),
+            'amount': TextInput(
+                attrs={
+                    'class': DJANGO_LEDGER_FORM_INPUT_CLASSES + ' is-small',
+                }
+            ),
+            'description': TextInput(
+                attrs={
+                    'class': DJANGO_LEDGER_FORM_INPUT_CLASSES + ' is-small',
+                }
+            ),
         }
 
 
 class TransactionModelFormSet(BaseModelFormSet):
-
     def __init__(self, *args, entity_model: EntityModel, je_model: JournalEntryModel, **kwargs):
         super().__init__(*args, **kwargs)
         je_model.validate_for_entity(entity_model)
@@ -69,10 +71,11 @@ class TransactionModelFormSet(BaseModelFormSet):
             # noinspection PyUnresolvedReferences
             if self.can_delete and self._should_delete_form(form):
                 continue
-        txs_balances = [{
-            'tx_type': tx.cleaned_data.get('tx_type'),
-            'amount': tx.cleaned_data.get('amount')
-        } for tx in self.forms if not self._should_delete_form(tx)]
+        txs_balances = [
+            {'tx_type': tx.cleaned_data.get('tx_type'), 'amount': tx.cleaned_data.get('amount')}
+            for tx in self.forms
+            if not self._should_delete_form(tx)
+        ]
         balance_ok = check_tx_balance(txs_balances, perform_correction=False)
         if not balance_ok:
             raise ValidationError(message=_('Credits and Debits do not balance.'))
@@ -85,4 +88,5 @@ def get_transactionmodel_formset_class(journal_entry_model: JournalEntryModel):
         form=TransactionModelForm,
         formset=TransactionModelFormSet,
         can_delete=can_delete,
-        extra=6 if can_delete else 0)
+        extra=6 if can_delete else 0,
+    )

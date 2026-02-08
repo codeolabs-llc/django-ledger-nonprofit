@@ -11,17 +11,21 @@ from datetime import timedelta, date
 from typing import Tuple, Optional
 
 from django.contrib.auth.mixins import PermissionRequiredMixin, LoginRequiredMixin
-from django.core.exceptions import ValidationError, ObjectDoesNotExist, ImproperlyConfigured
-from django.db.models import Q, QuerySet
-from django.http import Http404, HttpResponse, HttpResponseNotFound
+from django.core.exceptions import (
+    ValidationError,
+    ObjectDoesNotExist,
+    ImproperlyConfigured,
+)
+from django.db.models import Q
+from django.http import Http404, HttpResponse
 from django.urls import reverse
 from django.utils.dateparse import parse_date
 from django.utils.translation import gettext_lazy as _
 from django.views.generic.dates import YearMixin, MonthMixin, DayMixin
 
-from django_ledger.models import EntityModel, InvoiceModel, BillModel
+from django_ledger.models import EntityModel, InvoiceModel, BillModel, LedgerModel
 from django_ledger.models.entity import EntityModelFiscalPeriodMixIn
-from django_ledger.settings import DJANGO_LEDGER_PDF_SUPPORT_ENABLED, DJANGO_LEDGER_AUTHORIZED_SUPERUSER
+from django_ledger.settings import DJANGO_LEDGER_AUTHORIZED_SUPERUSER
 
 
 class ContextFromToDateMixin:
@@ -35,16 +39,18 @@ class ContextFromToDateMixin:
         return self.TO_DATE_CONTEXT_NAME
 
 
-# noinspection PyUnresolvedReferences
-class YearlyReportMixIn(YearMixin, ContextFromToDateMixin, EntityModelFiscalPeriodMixIn):
-
+class YearlyReportMixIn(
+    YearMixin, ContextFromToDateMixin, EntityModelFiscalPeriodMixIn
+):
     def get_from_date(self, year: int = None, fy_start: int = None, **kwargs) -> date:
         return self.get_year_start_date(year, fy_start)
 
     def get_to_date(self, year: int = None, fy_start: int = None, **kwargs) -> date:
         return self.get_year_end_date(year, fy_start)
 
-    def get_from_to_dates(self, year: int = None, fy_start: int = None, **kwargs) -> Tuple[date, date]:
+    def get_from_to_dates(
+        self, year: int = None, fy_start: int = None, **kwargs
+    ) -> Tuple[date, date]:
         from_date = self.get_from_date(year, fy_start, **kwargs)
         to_date = self.get_to_date(year, fy_start, **kwargs)
         return from_date, to_date
@@ -79,8 +85,9 @@ class YearlyReportMixIn(YearMixin, ContextFromToDateMixin, EntityModelFiscalPeri
         return context
 
 
-# noinspection PyUnresolvedReferences
-class QuarterlyReportMixIn(YearMixin, ContextFromToDateMixin, EntityModelFiscalPeriodMixIn):
+class QuarterlyReportMixIn(
+    YearMixin, ContextFromToDateMixin, EntityModelFiscalPeriodMixIn
+):
     quarter = None
     quarter_url_kwarg = 'quarter'
 
@@ -91,9 +98,11 @@ class QuarterlyReportMixIn(YearMixin, ContextFromToDateMixin, EntityModelFiscalP
             try:
                 self.validate_quarter(quarter)
             except ValidationError:
-                raise Http404(_("Invalid quarter number"))
+                raise Http404(_('Invalid quarter number'))
         except ValueError:
-            raise Http404(_(f"Invalid quarter format. Cannot parse {quarter} into integer."))
+            raise Http404(
+                _(f'Invalid quarter format. Cannot parse {quarter} into integer.')
+            )
         return quarter
 
     def get_quarter(self) -> int:
@@ -105,32 +114,43 @@ class QuarterlyReportMixIn(YearMixin, ContextFromToDateMixin, EntityModelFiscalP
                 try:
                     quarter = self.request.GET[self.quarter_url_kwarg]
                 except KeyError:
-                    raise Http404(_("No quarter specified"))
+                    raise Http404(_('No quarter specified'))
         quarter = self.parse_quarter(quarter)
         return quarter
 
-    def get_from_date(self, quarter: int = None, year: int = None, fy_start: int = None) -> date:
+    def get_from_date(
+        self, quarter: int = None, year: int = None, fy_start: int = None, **kwargs
+    ) -> date:
         return self.get_quarter_start_date(quarter, year, fy_start)
 
-    def get_to_date(self, quarter: int = None, year: int = None, fy_start: int = None) -> date:
+    def get_to_date(
+        self, quarter: int = None, year: int = None, fy_start: int = None, **kwargs
+    ) -> date:
         return self.get_quarter_end_date(quarter, year, fy_start)
 
-    def get_from_to_dates(self,
-                          quarter: int = None,
-                          year: int = None,
-                          fy_start: int = None) -> Tuple[date, date]:
-        from_date = self.get_from_date(quarter=quarter, year=year, fy_start=fy_start)
-        to_date = self.get_to_date(quarter=quarter, year=year, fy_start=fy_start)
+    def get_from_to_dates(
+        self, quarter: int = None, year: int = None, fy_start: int = None, **kwargs
+    ) -> Tuple[date, date]:
+        from_date = self.get_from_date(
+            quarter=quarter, year=year, fy_start=fy_start, **kwargs
+        )
+        to_date = self.get_to_date(
+            quarter=quarter, year=year, fy_start=fy_start, **kwargs
+        )
         return from_date, to_date
 
-    def get_quarter_start_date(self, quarter: int = None, year: int = None, fy_start: int = None) -> date:
+    def get_quarter_start_date(
+        self, quarter: int = None, year: int = None, fy_start: int = None
+    ) -> date:
         if not year:
             year = self.get_year()
         if not quarter:
             quarter = self.get_quarter()
         return self.get_quarter_start(year, quarter, fy_start)
 
-    def get_quarter_end_date(self, quarter: int = None, year: int = None, fy_start: int = None) -> date:
+    def get_quarter_end_date(
+        self, quarter: int = None, year: int = None, fy_start: int = None
+    ) -> date:
         if not year:
             year = self.get_year()
         if not quarter:
@@ -153,27 +173,25 @@ class QuarterlyReportMixIn(YearMixin, ContextFromToDateMixin, EntityModelFiscalP
         context['has_quarter'] = True
         return context
 
-    @staticmethod
-    def get_next_quarter(quarter) -> int:
-        return quarter + 1 if quarter != 4 else 1
+    def get_next_quarter(self, quarter) -> int:
+        if quarter != 4:
+            return quarter + 1
 
-    @staticmethod
-    def get_previous_quarter(quarter) -> int:
-        return quarter - 1 if quarter != 1 else 4
+    def get_previous_quarter(self, quarter) -> int:
+        if quarter != 1:
+            return quarter - 1
 
 
 class MonthlyReportMixIn(YearlyReportMixIn, ContextFromToDateMixin, MonthMixin):
-
     def get_from_date(self, month: int = None, year: int = None, **kwargs) -> date:
         return self.get_month_start_date(month=month, year=year)
 
     def get_to_date(self, month: int = None, year: int = None, **kwargs) -> date:
         return self.get_month_end_date(month=month, year=year)
 
-    def get_from_to_dates(self,
-                          month: int = None,
-                          year: int = None,
-                          **kwargs) -> Tuple[date, date]:
+    def get_from_to_dates(
+        self, month: int = None, year: int = None, **kwargs
+    ) -> Tuple[date, date]:
         from_date = self.get_from_date(month=month, year=year, **kwargs)
         to_date = self.get_to_date(month=month, year=year, **kwargs)
         return from_date, to_date
@@ -221,7 +239,6 @@ class MonthlyReportMixIn(YearlyReportMixIn, ContextFromToDateMixin, MonthMixin):
 
 
 class DateReportMixIn(MonthlyReportMixIn, ContextFromToDateMixin, DayMixin):
-
     def get_context_data(self, **kwargs):
         context = super(MonthlyReportMixIn, self).get_context_data(**kwargs)
         view_date = self.get_date()
@@ -234,11 +251,7 @@ class DateReportMixIn(MonthlyReportMixIn, ContextFromToDateMixin, DayMixin):
         return context
 
     def get_date(self) -> date:
-        return date(
-            year=self.get_year(),
-            month=self.get_month(),
-            day=self.get_day()
-        )
+        return date(year=self.get_year(), month=self.get_month(), day=self.get_day())
 
     def get_from_date(self, month: int = None, year: int = None, **kwargs) -> date:
         return self.get_date()
@@ -246,13 +259,14 @@ class DateReportMixIn(MonthlyReportMixIn, ContextFromToDateMixin, DayMixin):
     def get_to_date(self, month: int = None, year: int = None, **kwargs) -> date:
         return self.get_date()
 
-    def get_from_to_dates(self, month: int = None, year: int = None, **kwargs) -> Tuple[date, date]:
+    def get_from_to_dates(
+        self, month: int = None, year: int = None, **kwargs
+    ) -> Tuple[date, date]:
         dt = self.get_from_date(month=month, year=year, **kwargs)
         return dt, dt
 
 
 # todo: need to incorporate in base view...
-# noinspection PyUnresolvedReferences
 class FromToDatesParseMixIn:
     DJL_FROM_DATE_PARAM: str = 'from_date'
     DJL_TO_DATE_PARAM: str = 'to_date'
@@ -290,20 +304,17 @@ class FromToDatesParseMixIn:
         return param_date
 
 
-# noinspection PyUnresolvedReferences
 class SuccessUrlNextMixIn:
-
     def has_next_url(self):
         return self.request.GET.get('next') is not None
 
     def get_success_url(self):
-        next_url = self.request.GET.get('next')
-        if next_url:
-            return next_url
+        next = self.request.GET.get('next')
+        if next:
+            return next
         return reverse('django_ledger:home')
 
 
-# noinspection PyUnresolvedReferences
 class DjangoLedgerSecurityMixIn(LoginRequiredMixin, PermissionRequiredMixin):
     ENTITY_SLUG_URL_KWARG = 'entity_slug'
     ENTITY_MODEL_CONTEXT_NAME = 'entity_model'
@@ -316,7 +327,9 @@ class DjangoLedgerSecurityMixIn(LoginRequiredMixin, PermissionRequiredMixin):
 
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)
-        context[self.ENTITY_MODEL_CONTEXT_NAME] = self.get_authorized_entity_instance(raise_exception=False)
+        context[self.ENTITY_MODEL_CONTEXT_NAME] = self.get_authorized_entity_instance(
+            raise_exception=False
+        )
         return context
 
     def get_login_url(self):
@@ -327,9 +340,7 @@ class DjangoLedgerSecurityMixIn(LoginRequiredMixin, PermissionRequiredMixin):
 
     def get_entity_slug_kwarg(self):
         if self.ENTITY_SLUG_URL_KWARG is None:
-            raise ImproperlyConfigured(
-                _('ENTITY_SLUG_URL_KWARG must be provided.')
-            )
+            raise ImproperlyConfigured(_('ENTITY_SLUG_URL_KWARG must be provided.'))
         return self.ENTITY_SLUG_URL_KWARG
 
     def get_superuser_authorization(self):
@@ -346,7 +357,9 @@ class DjangoLedgerSecurityMixIn(LoginRequiredMixin, PermissionRequiredMixin):
         if self.request.user.is_authenticated:
             if entity_slug_kwarg in self.kwargs:
                 try:
-                    self.AUTHORIZED_ENTITY_MODEL = entity_model_qs.get(slug__exact=self.kwargs[entity_slug_kwarg])
+                    self.AUTHORIZED_ENTITY_MODEL = entity_model_qs.get(
+                        slug__exact=self.kwargs[entity_slug_kwarg]
+                    )
                 except ObjectDoesNotExist:
                     return False
             return True
@@ -358,11 +371,13 @@ class DjangoLedgerSecurityMixIn(LoginRequiredMixin, PermissionRequiredMixin):
             authorized_superuser=self.get_superuser_authorization(),
         )
 
-    def get_authorized_entity_instance(self, raise_exception: bool = True) -> Optional[EntityModel]:
+    def get_authorized_entity_instance(
+        self, raise_exception: bool = True
+    ) -> Optional[EntityModel]:
         if self.AUTHORIZED_ENTITY_MODEL is None:
             if raise_exception:
                 raise Http404()
-            return None
+            return
         return self.AUTHORIZED_ENTITY_MODEL
 
     def get_authorized_entity_instance_name(self) -> Optional[str]:
@@ -372,7 +387,6 @@ class DjangoLedgerSecurityMixIn(LoginRequiredMixin, PermissionRequiredMixin):
         return entity_model.name
 
 
-# noinspection PyUnresolvedReferences
 class EntityUnitMixIn:
     UNIT_SLUG_KWARG = 'unit_slug'
     UNIT_SLUG_QUERY_PARAM = 'unit'
@@ -388,16 +402,14 @@ class EntityUnitMixIn:
         unit_slug = self.get_unit_slug()
         context['unit_slug'] = unit_slug
 
-        by_unit = any([
-            True if unit_slug else False,
-            self.request.GET.get('by_unit') is not None
-        ])
+        by_unit = any(
+            [True if unit_slug else False, self.request.GET.get('by_unit') is not None]
+        )
 
         context['by_unit'] = by_unit
         return context
 
 
-# noinspection PyUnresolvedReferences
 class DigestContextMixIn:
     IO_DIGEST_UNBOUNDED = False
     IO_DIGEST_BOUNDED = False
@@ -422,18 +434,12 @@ class DigestContextMixIn:
 
     def get_context_data(self, **kwargs):
         context = super(DigestContextMixIn, self).get_context_data(**kwargs)
-        return self.get_io_digest(context=context)
+        return self.get_io_digest(context=context, **kwargs)
 
-    def get_io_digest(self,
-                      context,
-                      from_date=None,
-                      to_date=None):
-
-        if any([self.IO_DIGEST_UNBOUNDED,
-                self.IO_DIGEST_BOUNDED]):
-
+    def get_io_digest(self, context, from_date=None, to_date=None, **kwargs):
+        if any([self.IO_DIGEST_UNBOUNDED, self.IO_DIGEST_BOUNDED]):
             by_period = self.request.GET.get('by_period')
-            entity_model: EntityModel = self.object
+            io_model: EntityModel | LedgerModel = self.object
             if not to_date:
                 to_date = context['to_date']
             if not from_date:
@@ -446,19 +452,26 @@ class DigestContextMixIn:
                 unit_slug = None
 
             if self.IO_DIGEST_UNBOUNDED:
-                io_digest = entity_model.digest(user_model=self.request.user,
-                                                to_date=to_date,
-                                                unit_slug=unit_slug,
-                                                by_period=True if by_period else False,
-                                                process_ratios=True,
-                                                process_roles=True,
-                                                process_groups=True)
+                io_digest = io_model.digest(
+                    user_model=self.request.user,
+                    entity_slug=io_model.entity_slug
+                    if isinstance(io_model, LedgerModel)
+                    else None,
+                    to_date=to_date,
+                    unit_slug=unit_slug,
+                    by_period=True if by_period else False,
+                    process_ratios=True,
+                    process_roles=True,
+                    process_groups=True,
+                )
 
                 context[self.get_io_manager_unbounded_context_name()] = io_digest
-                context[self.get_io_digest_unbounded_context_name()] = io_digest.get_io_data()
+                context[self.get_io_digest_unbounded_context_name()] = (
+                    io_digest.get_io_data()
+                )
 
             if self.IO_DIGEST_BOUNDED:
-                io_digest_equity = entity_model.digest(
+                io_digest_equity = io_model.digest(
                     user_model=self.request.user,
                     equity_only=True,
                     to_date=to_date,
@@ -467,18 +480,19 @@ class DigestContextMixIn:
                     by_period=True if by_period else False,
                     process_ratios=True,
                     process_roles=True,
-                    process_groups=True
+                    process_groups=True,
                 )
 
                 context[self.get_io_manager_bounded_context_name()] = io_digest_equity
-                context[self.get_io_digest_bounded_context_name()] = io_digest_equity.get_io_data()
+                context[self.get_io_digest_bounded_context_name()] = (
+                    io_digest_equity.get_io_data()
+                )
 
             # todo: how is this used??....
             context['date_filter'] = to_date
         return context
 
 
-# noinspection PyUnresolvedReferences
 class UnpaidElementsMixIn:
     FETCH_UNPAID_INVOICES: bool = False
     FETCH_UNPAID_BILLS: bool = False
@@ -489,55 +503,59 @@ class UnpaidElementsMixIn:
         context['bills'] = self.get_unpaid_bills_qs(context)
         return context
 
-    def get_unpaid_invoices_qs(self, context, from_date=None, to_date=None) -> QuerySet:
+    def get_unpaid_invoices_qs(self, context, from_date=None, to_date=None):
         if self.FETCH_UNPAID_INVOICES:
             from_date = context['from_date'] if not from_date else from_date
             to_date = context['to_date'] if not to_date else to_date
 
-            qs = InvoiceModel.objects.for_entity(
-                user_model=self.request.user,
-                entity_slug=self.kwargs['entity_slug']
-            ).approved().filter(
-                Q(date_approved__gte=from_date) &
-                Q(date_approved__lte=to_date)
-            ).select_related('customer').order_by('date_due')
+            qs = (
+                InvoiceModel.objects.for_entity(entity_model=self.kwargs['entity_slug'])
+                .for_user(user_model=self.request.user)
+                .approved()
+                .filter(Q(date_approved__gte=from_date) & Q(date_approved__lte=to_date))
+                .select_related('customer')
+                .order_by('date_due')
+            )
 
             unit_slug = self.get_unit_slug()
             if unit_slug:
-                qs = qs.filter(ledger__journal_entries__entity_unit__slug__exact=unit_slug)
+                qs = qs.filter(
+                    ledger__journal_entries__entity_unit__slug__exact=unit_slug
+                )
 
             return qs
-        return QuerySet()   # empty queryset
 
-    def get_unpaid_bills_qs(self, context, from_date=None, to_date=None) -> QuerySet:
+    def get_unpaid_bills_qs(self, context, from_date=None, to_date=None):
         if self.FETCH_UNPAID_BILLS:
             from_date = context['from_date'] if not from_date else from_date
             to_date = context['to_date'] if not to_date else to_date
 
-            qs = BillModel.objects.for_entity(
-                user_model=self.request.user,
-                entity_slug=self.kwargs['entity_slug']
-            ).unpaid().filter(
-                Q(date_approved__gte=from_date) &
-                Q(date_approved__lte=to_date)
-            ).select_related('vendor').order_by('date_due')
+            qs = (
+                BillModel.objects.for_entity(entity_model=self.kwargs['entity_slug'])
+                .for_user(user_model=self.request.user)
+                .unpaid()
+                .filter(Q(date_approved__gte=from_date) & Q(date_approved__lte=to_date))
+                .select_related('vendor')
+                .order_by('date_due')
+            )
 
             unit_slug = self.get_unit_slug()
+
             if unit_slug:
-                qs = qs.filter(ledger__journal_entries__entity_unit__slug__exact=unit_slug)
+                qs = qs.filter(
+                    ledger__journal_entries__entity_unit__slug__exact=unit_slug
+                )
 
             return qs
-        return QuerySet()   # empty queryset
 
 
-# noinspection PyUnresolvedReferences
 class BaseDateNavigationUrlMixIn:
     BASE_DATE_URL_KWARGS = (
         'entity_slug',
         'unit_slug',
         'ledger_pk',
         'account_pk',
-        'coa_slug'
+        'coa_slug',
     )
 
     def get_context_data(self, **kwargs):
@@ -545,18 +563,17 @@ class BaseDateNavigationUrlMixIn:
         self.get_base_date_nav_url(context)
         return context
 
-    def get_base_date_nav_url(self, context):
+    def get_base_date_nav_url(self, context, **kwargs):
         view_name = context['view'].request.resolver_match.url_name
         view_name_base = '-'.join(view_name.split('-')[:2])
         context['date_navigation_url'] = reverse(
             f'django_ledger:{view_name_base}',
             kwargs={
-                k: v for k, v in self.kwargs.items() if
-                k in self.BASE_DATE_URL_KWARGS
-            })
+                k: v for k, v in self.kwargs.items() if k in self.BASE_DATE_URL_KWARGS
+            },
+        )
 
 
-# noinspection PyUnresolvedReferences
 class PDFReportMixIn:
     class PDFReportEnum:
         BS = 'BS'
@@ -574,14 +591,11 @@ class PDFReportMixIn:
         PDFReportEnum.CFS: 'get_cash_flow_statement',
     }
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.object = None
-
     def get_pdf_func_name(self):
         if not self.pdf_report_type:
-            raise NotImplementedError(f'Must define pdf_report_type from {self.PDFReportEnum.__name__}')
-        # noinspection PyTypeChecker
+            raise NotImplementedError(
+                f'Must define pdf_report_type from {self.PDFReportEnum.__name__}'
+            )
         return self.pdf_io_mixin_function_map[self.pdf_report_type]
 
     def get_pdf(self):
@@ -593,7 +607,7 @@ class PDFReportMixIn:
             from_date=self.get_pdf_from_date(),
             to_date=self.get_pdf_to_date(),
             user_model=self.request.user,
-            subtitle=self.get_pdf_subtitle()
+            subtitle=self.get_pdf_subtitle(),
         )
         pdf.create_pdf_report()
         return pdf
@@ -610,17 +624,20 @@ class PDFReportMixIn:
         return ctx['to_date']
 
     def get_pdf_response(self) -> HttpResponse:
-        if not DJANGO_LEDGER_PDF_SUPPORT_ENABLED:
-            return HttpResponseNotFound(content='PDF format is not supported')
         pdf = self.get_pdf()
         response = HttpResponse(
             bytes(pdf.output()),
-            content_type="application/pdf",
+            content_type='application/pdf',
         )
-        response.headers['Content-Disposition'] = f'attachment; filename={pdf.get_pdf_filename()}'
+        response.headers['Content-Disposition'] = (
+            f'attachment; filename={pdf.get_pdf_filename()}'
+        )
         return response
 
     def get(self, request, **kwargs):
-        if request.GET.get(self.pdf_format_query_param) == self.pdf_format_query_param_value:
+        if (
+            request.GET.get(self.pdf_format_query_param)
+            == self.pdf_format_query_param_value
+        ):
             return self.get_pdf_response()
         return super().get(request, **kwargs)

@@ -47,10 +47,11 @@ Roles serve several purposes:
 3. Enable accurate generation of financial statements
 4. Facilitate financial ratio calculations
 """
+import warnings
 from itertools import groupby
 from random import randint
-from typing import Union, List, Optional, TypeVar, Generic
-from uuid import uuid4
+from typing import Union, List, Optional
+from uuid import uuid4, UUID
 
 from django.core.exceptions import ValidationError
 from django.db import models
@@ -60,6 +61,7 @@ from django.urls import reverse
 from django.utils.translation import gettext_lazy as _
 from treebeard.mp_tree import MP_Node, MP_NodeManager, MP_NodeQuerySet
 
+from django_ledger.io import DEBIT, CREDIT
 from django_ledger.io.roles import (
     ACCOUNT_ROLE_CHOICES, BS_ROLES, GROUP_INVOICE, GROUP_BILL, validate_roles,
     GROUP_ASSETS, GROUP_LIABILITIES, GROUP_CAPITAL, GROUP_INCOME, GROUP_EXPENSES, GROUP_COGS,
@@ -67,45 +69,26 @@ from django_ledger.io.roles import (
     ROOT_CAPITAL, ROOT_INCOME, ROOT_EXPENSES, ROOT_COA, VALID_PARENTS,
     ROLES_ORDER_ALL, ASSET_CA_CASH
 )
+from django_ledger.models.deprecations import deprecated_entity_slug_behavior
 from django_ledger.models.mixins import CreateUpdateMixIn
 from django_ledger.models.utils import lazy_loader
-from django_ledger.settings import DJANGO_LEDGER_ACCOUNT_CODE_GENERATE, DJANGO_LEDGER_ACCOUNT_CODE_USE_PREFIX
-
-DEBIT = 'debit'
-"""A constant, identifying a DEBIT Account or DEBIT transaction in the respective database fields"""
-
-CREDIT = 'credit'
-"""A constant, identifying a CREDIT Account or CREDIT transaction in the respective database fields"""
+from django_ledger.settings import (
+    DJANGO_LEDGER_ACCOUNT_CODE_GENERATE,
+    DJANGO_LEDGER_ACCOUNT_CODE_USE_PREFIX,
+    DJANGO_LEDGER_USE_DEPRECATED_BEHAVIOR
+)
 
 
 class AccountModelValidationError(ValidationError):
     pass
 
-T = TypeVar('T', bound='AccountModel')
-QS = TypeVar('QS', bound='AccountModelQuerySet')
 
-class AccountModelQuerySet(MP_NodeQuerySet[T], Generic[T]):
+class AccountModelQuerySet(MP_NodeQuerySet):
     """
     Custom QuerySet for AccountModel inheriting from MP_NodeQuerySet.
     """
-    # override a couple methods to get type checking working
-    def filter(self: QS, *args, **kwargs) -> QS:
-        # noinspection PyTypeChecker
-        return super().filter(*args, **kwargs)
 
-    def order_by(self: QS, *field_names) -> QS:
-        # noinspection PyTypeChecker
-        return super().order_by(*field_names)
-
-    def select_related(self: QS, *fields) -> QS:
-        # noinspection PyTypeChecker
-        return super().select_related(*fields)
-
-    def annotate(self: QS, *args, **kwargs) -> QS:
-        # noinspection PyTypeChecker
-        return super().annotate(*args, **kwargs)
-
-    def active(self):
+    def active(self) -> 'AccountModelQuerySet':
         """
         Filters the queryset to include only active items.
 
@@ -116,7 +99,7 @@ class AccountModelQuerySet(MP_NodeQuerySet[T], Generic[T]):
         """
         return self.filter(active=True)
 
-    def inactive(self):
+    def inactive(self) -> 'AccountModelQuerySet':
         """
         Filters and returns queryset entries where the active field is set to False.
 
@@ -127,7 +110,7 @@ class AccountModelQuerySet(MP_NodeQuerySet[T], Generic[T]):
         """
         return self.filter(active=False)
 
-    def locked(self):
+    def locked(self) -> 'AccountModelQuerySet':
         """
         Filters the queryset to include only locked AccountModels.
 
@@ -138,7 +121,7 @@ class AccountModelQuerySet(MP_NodeQuerySet[T], Generic[T]):
         """
         return self.filter(locked=True)
 
-    def unlocked(self):
+    def unlocked(self) -> 'AccountModelQuerySet':
         """
         Returns a filtered list of items where the 'locked' attribute is set to False.
 
@@ -149,7 +132,7 @@ class AccountModelQuerySet(MP_NodeQuerySet[T], Generic[T]):
         """
         return self.filter(locked=False)
 
-    def with_roles(self, roles: Union[List, str]):
+    def with_roles(self, roles: Union[List, str]) -> 'AccountModelQuerySet':
         """
         Filter the accounts based on the specified roles. This method helps to retrieve accounts associated
         with a particular role or a list of roles.
@@ -174,16 +157,16 @@ class AccountModelQuerySet(MP_NodeQuerySet[T], Generic[T]):
         roles = validate_roles(roles)
         return self.filter(role__in=roles)
 
-    def with_codes(self, codes: Union[List, str]):
+    def with_codes(self, codes: Union[List, str]) -> 'AccountModelQuerySet':
         if isinstance(codes, str):
             codes = [codes]
         return self.filter(code__in=codes)
 
-    def cash(self):
+    def cash(self) -> 'AccountModelQuerySet':
         """Retrieve accounts that are of type ASSET_CA_CASH."""
         return self.filter(role__exact=ASSET_CA_CASH)
 
-    def expenses(self):
+    def expenses(self) -> 'AccountModelQuerySet':
         """
         Retrieve a queryset containing expenses filtered by specified roles.
 
@@ -198,7 +181,7 @@ class AccountModelQuerySet(MP_NodeQuerySet[T], Generic[T]):
         """
         return self.filter(role__in=GROUP_EXPENSES)
 
-    def is_coa_root(self):
+    def is_coa_root(self) -> 'AccountModelQuerySet':
         """
         Retrieves the Chart of Accounts (CoA) root node queryset.
 
@@ -212,7 +195,7 @@ class AccountModelQuerySet(MP_NodeQuerySet[T], Generic[T]):
         """
         return self.filter(role__in=ROOT_GROUP)
 
-    def not_coa_root(self):
+    def not_coa_root(self) -> 'AccountModelQuerySet':
         """
         Exclude AccountModels with ROOT_GROUP role from the QuerySet.
 
@@ -223,7 +206,7 @@ class AccountModelQuerySet(MP_NodeQuerySet[T], Generic[T]):
         """
         return self.exclude(role__in=ROOT_GROUP)
 
-    def gb_bs_role(self):
+    def gb_bs_role(self) -> 'AccountModelQuerySet':
         """
         Groups accounts by Balance Sheet Bucket and then further groups them by role.
 
@@ -245,7 +228,7 @@ class AccountModelQuerySet(MP_NodeQuerySet[T], Generic[T]):
             ]) for bsr, gb in accounts_gb
         ]
 
-    def is_role_default(self):
+    def is_role_default(self) -> 'AccountModelQuerySet':
         """
         Filter the queryset to include only entries where `role_default`
         is set to True, excluding entries marked as 'coa_root'.
@@ -257,7 +240,7 @@ class AccountModelQuerySet(MP_NodeQuerySet[T], Generic[T]):
         """
         return self.not_coa_root().filter(role_default=True)
 
-    def can_transact(self):
+    def can_transact(self) -> 'AccountModelQuerySet':
         """
         Filter the queryset to include only accounts that can accept new transactions.
 
@@ -272,14 +255,14 @@ class AccountModelQuerySet(MP_NodeQuerySet[T], Generic[T]):
             Q(coa_model__active=True)
         )
 
-    def available(self):
+    def available(self) -> 'AccountModelQuerySet':
         return self.filter(
             Q(locked=False) &
             Q(active=True) &
             Q(coa_model__active=True)
         )
 
-    def for_bill(self):
+    def for_bill(self) -> 'AccountModelQuerySet':
         """
         Retrieves only available and unlocked AccountModels for a specific EntityModel,
         specifically for the creation and management of Bills. Roles within the 'GROUP_BILL'
@@ -292,7 +275,7 @@ class AccountModelQuerySet(MP_NodeQuerySet[T], Generic[T]):
         """
         return self.available().filter(role__in=GROUP_BILL)
 
-    def for_invoice(self):
+    def for_invoice(self) -> 'AccountModelQuerySet':
         """
         Retrieves available and unlocked AccountModels for a specific EntityModel, specifically for the creation
         and management of Invoices.
@@ -308,6 +291,27 @@ class AccountModelQuerySet(MP_NodeQuerySet[T], Generic[T]):
         """
         return self.available().filter(role__in=GROUP_INVOICE)
 
+    def for_user(self, user_model) -> 'AccountModelQuerySet':
+        """
+        Parameters
+        ----------
+        user_model : UserModel
+            The user model instance to use for filtering.
+
+        Returns
+        -------
+        AccountModelQuerySet
+            The filtered queryset based on the user's permissions. Superusers get the complete queryset whereas other
+            users get a filtered queryset based on their role as admin or manager in the entity.
+        """
+        if user_model.is_superuser:
+            return self
+
+        return self.filter(
+            Q(coa_model__entity__admin=user_model) |
+            Q(coa_model__entity__managers__in=[user_model])
+        )
+
 
 class AccountModelManager(MP_NodeManager):
     """
@@ -317,7 +321,7 @@ class AccountModelManager(MP_NodeManager):
 
     def get_queryset(self) -> AccountModelQuerySet:
         """
-        Retrieve and return athe default AccountModel QuerySet.
+        Retrieve and return the default AccountModel QuerySet.
 
         The query set is ordered by the 'path' field and uses 'select_related' to reduce the number of database queries
         by retrieving the related 'coa_model'.
@@ -331,80 +335,98 @@ class AccountModelManager(MP_NodeManager):
             self.model,
             using=self._db
         ).order_by('path').select_related(
-            'coa_model').annotate(
+            'coa_model'
+        ).annotate(
             _coa_slug=F('coa_model__slug'),
             _coa_active=F('coa_model__active'),
             _entity_slug=F('coa_model__entity__slug'),
         )
 
-    def for_user(self, user_model) -> AccountModelQuerySet:
-        """
-        Parameters
-        ----------
-        user_model : UserModel
-            The user model instance to use for filtering.
-
-        Returns
-        -------
-        AccountModelQuerySet
-            The filtered queryset based on the user's permissions. Superusers get the complete queryset whereas other
-            users get a filtered queryset based on their role as admin or manager in the entity.
-        """
-        qs = self.get_queryset()
-        if user_model.is_superuser:
-            return qs
-        return qs.filter(
-            Q(coa_model__entity__admin=user_model) |
-            Q(coa_model__entity__managers__in=[user_model])
-        )
-
+    @deprecated_entity_slug_behavior
     def for_entity(
             self,
-            user_model,
-            entity_model,
-            coa_slug: Optional[str] = None
+            entity_model: Union['EntityModel | str | UUID'] = None,
+            coa_model: Optional['ChartOfAccountModel | str | UUID'] = None,
+            **kwargs
     ) -> AccountModelQuerySet:
         """
-        Retrieve accounts associated with a specified EntityModel and Chart of Accounts.
+        Filters the queryset for an entity and, optionally, a chart of account (COA) model.
+
+        The method refines the queryset based on the provided `entity_model` and, optionally,
+        the `coa_model`. If a deprecated `user_model` is specified in keyword arguments,
+        a warning is issued. The method supports `EntityModel`, `str`, and `UUID` types
+        for both `entity_model` and `coa_model`. A validation error is raised for unsupported types.
 
         Parameters
         ----------
-        user_model : User
-            The Django User instance initiating the request. Used to check for required permissions.
-        entity_model : Union[EntityModel, str]
-            An instance of EntityModel or its slug. This determines the entity whose accounts are being retrieved.
-            A database query will be carried out to identify the default Chart of Accounts.
-        coa_slug : Optional[str], default=None
-            The slug for a specific Chart of Accounts to be used. If None, the default Chart of Accounts will be selected.
+        entity_model : Union['EntityModel', str, UUID]
+            The entity model used for filtering the queryset. Could be an instance of
+            `EntityModel`, a string (slug), or a UUID.
+        coa_model : Optional[Union['ChartOfAccountModel', str, UUID]], optional
+            The COA model used for filtering the queryset. Can be an instance of
+            `ChartOfAccountModel`, a string (slug), or a UUID. If None, default Entity ChartOfAccounts is used.
+            Defaults to None.
+        **kwargs : dict
+            Additional keyword arguments. A deprecated argument `user_model` can be passed
+            for backward compatibility.
 
         Returns
         -------
         AccountModelQuerySet
-            A QuerySet containing accounts associated with the specified EntityModel and Chart of Accounts.
+            A queryset filtered by the input entity model and, optionally, the chart of
+            account model.
 
         Raises
         ------
         AccountModelValidationError
-            If the entity_model is neither an instance of EntityModel nor a string.
+            If an invalid type is passed for either `entity_model` or `coa_model`.
+
+        Warns
+        -----
+        DeprecationWarning
+            If the `user_model` parameter is passed in the keyword arguments and the
+            application relies on deprecated behavior.
         """
-        qs = self.for_user(user_model)
         EntityModel = lazy_loader.get_entity_model()
+        ChartOfAccountModel = lazy_loader.get_coa_model()
+
+        qs = self.get_queryset()
+
+        if 'user_model' in kwargs:
+            warnings.warn(
+                'user_model parameter is deprecated and will be removed in a future release. '
+                'Use for_user(user_model).for_entity(entity_model) instead to keep current behavior.',
+                DeprecationWarning,
+                stacklevel=2
+            )
+            if DJANGO_LEDGER_USE_DEPRECATED_BEHAVIOR:
+                qs = qs.for_user(kwargs['user_model'])
 
         if isinstance(entity_model, EntityModel):
-            entity_model = entity_model
             qs = qs.filter(coa_model__entity=entity_model)
         elif isinstance(entity_model, str):
             qs = qs.filter(coa_model__entity__slug__exact=entity_model)
+        elif isinstance(entity_model, UUID):
+            qs = qs.filter(coa_model__entity_id=entity_model)
         else:
             raise AccountModelValidationError(
-                message='Must pass an instance of EntityModel or String for entity_slug.'
+                message='Must pass an instance of EntityModel, String or UUID for entity_model.'
             )
 
-        return qs.filter(
-            coa_model__slug__exact=coa_slug
-        ) if coa_slug else qs.filter(
-            coa_model__slug__exact=F('coa_model__entity__default_coa__slug')
-        )
+        if coa_model:
+            if isinstance(coa_model, ChartOfAccountModel):
+                qs = qs.filter(coa_model=coa_model)
+            elif isinstance(coa_model, str):
+                qs = qs.filter(coa_model__slug__exact=coa_model)
+            elif isinstance(coa_model, UUID):
+                qs = qs.filter(coa_model__uuid__exact=coa_model)
+            else:
+                raise AccountModelValidationError(
+                    message='Must pass an instance of ChartOfAccountModel, String or UUID for coa_model.'
+                )
+            return qs
+
+        return qs.filter(coa_model__slug__exact=F('coa_model__entity__default_coa__slug'))
 
 
 def account_code_validator(value: str):
@@ -456,8 +478,7 @@ class AccountModelAbstract(MP_Node, CreateUpdateMixIn):
     coa_model = models.ForeignKey('django_ledger.ChartOfAccountModel',
                                   on_delete=models.CASCADE,
                                   verbose_name=_('Chart of Accounts'))
-    objects = AccountModelManager()
-    node_order_by = ['uuid']
+    objects = AccountModelManager.from_queryset(queryset_class=AccountModelQuerySet)()
 
     class Meta:
         abstract = True
@@ -514,14 +535,19 @@ class AccountModelAbstract(MP_Node, CreateUpdateMixIn):
         Property that retrieves the `coa_slug` attribute from the object. If the attribute
         is not found, it fetches the `slug` attribute from the `coa_model`.
 
+        Attributes:
+            _coa_slug (str): Cached value of the `coa_slug` if it exists.
+            coa_model (Any): Object containing the `slug` attribute that serves
+                as a fallback when `_coa_slug` is not present.
+
         Returns:
             str: The value of `_coa_slug` if defined, or the `slug` attribute from
             `coa_model` if `_coa_slug` is not available.
         """
         try:
-            return getattr(self, '_coa_slug')       # comes from a DB annotation
+            return getattr(self, '_coa_slug')
         except AttributeError:
-            return self.coa_model.slug              # comes frm the model field
+            return self.coa_model.slug
 
     @property
     def entity_slug(self):
@@ -689,6 +715,11 @@ class AccountModelAbstract(MP_Node, CreateUpdateMixIn):
         """
         Determines whether the current Account Model role belongs to the income group.
 
+        Parameters
+        ----------
+        self : object
+            The instance of the class containing attribute 'role'.
+
         Returns
         -------
         bool
@@ -710,6 +741,10 @@ class AccountModelAbstract(MP_Node, CreateUpdateMixIn):
     def is_expense(self) -> bool:
         """
         Checks if the current Account Model `role` is categorized under `GROUP_EXPENSES`.
+
+        Parameters
+        ----------
+        None
 
         Returns
         -------
@@ -786,7 +821,7 @@ class AccountModelAbstract(MP_Node, CreateUpdateMixIn):
             self.locked is True
         ])
 
-    def lock(self, commit: bool = True, raise_exception: bool = True):
+    def lock(self, commit: bool = True, raise_exception: bool = True, **kwargs):
         if not self.can_lock():
             if raise_exception:
                 raise AccountModelValidationError(
@@ -801,7 +836,7 @@ class AccountModelAbstract(MP_Node, CreateUpdateMixIn):
                 'updated'
             ])
 
-    def unlock(self, commit: bool = True, raise_exception: bool = True):
+    def unlock(self, commit: bool = True, raise_exception: bool = True, **kwargs):
         if not self.can_unlock():
             if raise_exception:
                 raise AccountModelValidationError(
@@ -816,7 +851,7 @@ class AccountModelAbstract(MP_Node, CreateUpdateMixIn):
                 'updated'
             ])
 
-    def activate(self, commit: bool = True, raise_exception: bool = True):
+    def activate(self, commit: bool = True, raise_exception: bool = True, **kwargs):
         """
         Checks if the Account Model instance can be activated, then Activates the AccountModel instance.
         Raises exception if AccountModel cannot be activated.
@@ -827,6 +862,8 @@ class AccountModelAbstract(MP_Node, CreateUpdateMixIn):
             If True, commit the changes to the database by calling the save method.
         raise_exception : bool, optional
             If True, raises an AccountModelValidationError if the account cannot be activated.
+        kwargs : dict
+            Additional parameters that can be passed for further customization.
         """
         if not self.can_activate():
             if raise_exception:
@@ -841,7 +878,7 @@ class AccountModelAbstract(MP_Node, CreateUpdateMixIn):
                 'updated'
             ])
 
-    def deactivate(self, commit: bool = True, raise_exception: bool = True):
+    def deactivate(self, commit: bool = True, raise_exception: bool = True, **kwargs):
         """
         Checks if the Account Model instance can be de-activated, then De-activates the AccountModel instance.
         Raises exception if AccountModel cannot be de-activated.
@@ -852,6 +889,8 @@ class AccountModelAbstract(MP_Node, CreateUpdateMixIn):
             If True, commit the changes to the database by calling the save method.
         raise_exception : bool, optional
             If True, raises an AccountModelValidationError if the account cannot be activated.
+        kwargs : dict
+            Additional parameters that can be passed for further customization.
         """
         if not self.can_deactivate():
             if raise_exception:
@@ -1106,7 +1145,6 @@ class AccountModel(AccountModelAbstract):
         abstract = False
 
 
-# noinspection PyUnusedLocal
 def accountmodel_presave(instance: AccountModel, **kwargs):
     if instance.role_default is False:
         instance.role_default = None

@@ -2,8 +2,8 @@
 Django Ledger created by Miguel Sanda <msanda@arrobalytics.com>.
 Copyright© EDMA Group Inc licensed under the GPLv3 Agreement.
 """
-
-from datetime import datetime, time
+import warnings
+from datetime import datetime, time, date
 from decimal import Decimal
 from itertools import groupby, chain
 from typing import Optional
@@ -12,58 +12,75 @@ from uuid import uuid4, UUID
 from django.core.exceptions import ValidationError
 from django.core.validators import MinValueValidator
 from django.db import models
-from django.db.models import Q, Count
+from django.db.models import Q, Manager, QuerySet, Count
 from django.db.models.signals import pre_save
 from django.urls import reverse
 from django.utils.timezone import make_aware
 from django.utils.translation import gettext_lazy as _
 
+from django_ledger.models import EntityModel, deprecated_entity_slug_behavior, lazy_loader
 from django_ledger.models.journal_entry import JournalEntryModel
 from django_ledger.models.ledger import LedgerModel
 from django_ledger.models.mixins import CreateUpdateMixIn, MarkdownNotesMixIn
 from django_ledger.models.transactions import TransactionModel
-from django_ledger.models.utils import lazy_loader
+from django_ledger.settings import DJANGO_LEDGER_USE_DEPRECATED_BEHAVIOR
 
 
 class ClosingEntryValidationError(ValidationError):
     pass
 
 
-class ClosingEntryModelQuerySet(models.QuerySet):
+class ClosingEntryModelQuerySet(QuerySet):
 
-    def posted(self):
+    def for_user(self, user_model):
+        if user_model.is_superuser:
+            return self
+        return self.filter(
+            Q(entity_model__admin=user_model) |
+            Q(entity_model__managers__in=[user_model])
+        )
+
+    def posted(self) -> 'ClosingEntryModelQuerySet':
         return self.filter(posted=True)
 
-    def not_posted(self):
+    def not_posted(self) -> 'ClosingEntryModelQuerySet':
         return self.filter(posted=False)
 
 
-class ClosingEntryModelManager(models.Manager):
+class ClosingEntryModelManager(Manager):
 
-    def get_queryset(self):
+    def get_queryset(self) -> ClosingEntryModelQuerySet:
         qs = ClosingEntryModelQuerySet(self.model, using=self._db)
         return qs.annotate(
             ce_txs_count=Count('closingentrytransactionmodel')
         )
 
-    def for_user(self, user_model):
-        qs = self.get_queryset()
-        if user_model.is_superuser:
-            return qs
-        return qs.filter(
-            Q(entity_model__admin=user_model) |
-            Q(entity_model__managers__in=[user_model])
-        )
+    @deprecated_entity_slug_behavior
+    def for_entity(self, entity_model: EntityModel | str | UUID = None, **kwargs) -> ClosingEntryModelQuerySet:
 
-    def for_entity(self, entity_slug, user_model):
-        qs = self.for_user(user_model)
-        if isinstance(entity_slug, lazy_loader.get_entity_model()):
-            return qs.filter(
-                Q(entity_model=entity_slug)
+        qs = self.get_queryset()
+
+        if 'user_model' in kwargs:
+            warnings.warn(
+                'user_model parameter is deprecated and will be removed in a future release. '
+                'Use for_user(user_model).for_entity(entity_model) instead to keep current behavior.',
+                DeprecationWarning,
+                stacklevel=2
             )
-        return qs.filter(
-            Q(entity_model__slug__exact=entity_slug)
-        )
+            if DJANGO_LEDGER_USE_DEPRECATED_BEHAVIOR:
+                qs = qs.for_user(kwargs['user_model'])
+
+        if isinstance(entity_model, EntityModel):
+            qs = qs.filter(entity_model=entity_model)
+        elif isinstance(entity_model, str):
+            qs = qs.filter(entity_model__slug__exact=entity_model)
+        elif isinstance(entity_model, UUID):
+            qs = qs.filter(entity_model_id=entity_model)
+        else:
+            raise ClosingEntryValidationError(
+                message='Must pass EntityModel, slug or UUID'
+            )
+        return qs
 
 
 class ClosingEntryModelAbstract(CreateUpdateMixIn, MarkdownNotesMixIn):
@@ -107,7 +124,6 @@ class ClosingEntryModelAbstract(CreateUpdateMixIn, MarkdownNotesMixIn):
 
     def migrate(self):
 
-        # noinspection PyUnresolvedReferences
         ce_txs = self.closingentrytransactionmodel_set.all().select_related(
             'account_model',
             'unit_model'
@@ -200,7 +216,7 @@ class ClosingEntryModelAbstract(CreateUpdateMixIn, MarkdownNotesMixIn):
     def can_post(self) -> bool:
         return not self.is_posted()
 
-    def mark_as_posted(self, commit: bool = False, update_entity_meta: bool = True):
+    def mark_as_posted(self, commit: bool = False, update_entity_meta: bool = True, **kwargs):
         if not self.can_post():
             raise ClosingEntryValidationError(
                 message=_(f'Closing Entry {self.closing_date} is already posted.')
@@ -237,7 +253,7 @@ class ClosingEntryModelAbstract(CreateUpdateMixIn, MarkdownNotesMixIn):
     def can_unpost(self) -> bool:
         return self.is_posted()
 
-    def mark_as_unposted(self, commit: bool = False, update_entity_meta: bool = True):
+    def mark_as_unposted(self, commit: bool = False, update_entity_meta: bool = True, **kwargs):
         if not self.can_unpost():
             raise ClosingEntryValidationError(
                 message=_(f'Closing Entry {self.closing_date} is not posted.')
@@ -248,7 +264,7 @@ class ClosingEntryModelAbstract(CreateUpdateMixIn, MarkdownNotesMixIn):
         self.posted = False
 
         TransactionModel.objects.for_entity(
-            entity_slug=self.entity_model_id
+            entity_model=self.entity_model_id
         ).for_ledger(ledger_model=self.ledger_model).delete()
 
         self.ledger_model.journal_entries.all().delete()
@@ -281,7 +297,7 @@ class ClosingEntryModelAbstract(CreateUpdateMixIn, MarkdownNotesMixIn):
     def can_update_txs(self) -> bool:
         return not self.is_posted()
 
-    def update_transactions(self, force_update: bool = False, post_closing_entry: bool = True):
+    def update_transactions(self, force_update: bool = False, post_closing_entry: bool = True, **kwargs):
         if not self.can_update_txs():
             raise ClosingEntryValidationError(
                 message=_('Cannot update transactions of a posted Closing Entry.')
@@ -322,7 +338,7 @@ class ClosingEntryModelAbstract(CreateUpdateMixIn, MarkdownNotesMixIn):
         self.ledger_model.unpost(commit=True, raise_exception=True)
 
         TransactionModel.objects.for_entity(
-            entity_slug=self.entity_model_id
+            entity_model=self.entity_model_id
         ).for_ledger(ledger_model=self.ledger_model).delete()
 
         return self.ledger_model.delete()
@@ -362,19 +378,62 @@ class ClosingEntryModel(ClosingEntryModelAbstract):
         abstract = False
 
 
-class ClosingEntryTransactionModelQuerySet(models.QuerySet):
-    pass
+def closingentrymodel_presave(instance: ClosingEntryModel, **kwargs):
+    instance.create_entry_ledger(commit=False)
 
 
-class ClosingEntryTransactionModelManager(models.Manager):
+pre_save.connect(closingentrymodel_presave, sender=ClosingEntryModel)
 
-    def for_entity(self, entity_slug):
+
+class ClosingEntryTransactionModelQuerySet(QuerySet):
+
+    def for_user(self, user_model) -> 'ClosingEntryTransactionModelQuerySet':
+        if user_model.is_superuser:
+            return self
+        return self.filter(
+            Q(closing_entry_model__entity_model__admin=user_model) |
+            Q(closing_entry_model__entity_model__managers__in=[user_model])
+        )
+
+    def for_closing_date(self, closing_date: date) -> 'ClosingEntryTransactionModelQuerySet':
+        return self.filter(
+            closing_entry_model__closing_date__exact=closing_date
+        )
+
+
+class ClosingEntryTransactionModelManager(Manager):
+
+    def get_queryset(self) -> ClosingEntryTransactionModelQuerySet:
+        return ClosingEntryTransactionModelQuerySet(self.model, using=self._db)
+
+    @deprecated_entity_slug_behavior
+    def for_entity(self, entity_model: EntityModel | str | UUID = None,
+                   **kwargs) -> ClosingEntryTransactionModelQuerySet:
+        EntityModel = lazy_loader.get_entity(entity_model)
+
         qs = self.get_queryset()
-        if isinstance(entity_slug, lazy_loader.get_entity_model()):
-            return qs.filter(closing_entry_model__entity_model=entity_slug)
-        elif isinstance(entity_slug, UUID):
-            return qs.filter(closing_entry_model__entity_model__uuid__exact=entity_slug)
-        return qs.filter(closing_entry_model__entity_model__slug__exact=entity_slug)
+
+        if 'user_model' in kwargs:
+            warnings.warn(
+                'user_model parameter is deprecated and will be removed in a future release. '
+                'Use for_user(user_model).for_entity(entity_model) instead to keep current behavior.',
+                DeprecationWarning,
+                stacklevel=2
+            )
+            if DJANGO_LEDGER_USE_DEPRECATED_BEHAVIOR:
+                qs = qs.for_user(kwargs['user_model'])
+
+        if isinstance(entity_model, EntityModel):
+            qs = qs.filter(closing_entry_model__entity_model=entity_model)
+        elif isinstance(entity_model, UUID):
+            qs = qs.filter(closing_entry_model__entity_model_id=entity_model)
+        elif isinstance(entity_model, str):
+            qs = qs.filter(closing_entry_model__slug__exact=entity_model)
+        else:
+            raise ClosingEntryValidationError(
+                message=_('Must pass EntityModel or UUID or str')
+            )
+        return qs
 
 
 class ClosingEntryTransactionModelAbstract(CreateUpdateMixIn):
@@ -455,10 +514,10 @@ class ClosingEntryTransactionModelAbstract(CreateUpdateMixIn):
         return f'{self.__class__.__name__}: {self.closing_entry_model.closing_date.strftime("%D")} | {self.balance}'
 
     def is_debit(self) -> bool:
-        return self.tx_type == TransactionModel.DEBIT if self.tx_type is not None else False
+        return self.tx_type == TransactionModel.DEBIT
 
     def is_credit(self) -> bool:
-        return self.tx_type == TransactionModel.CREDIT if self.tx_type is not None else False
+        return self.tx_type == TransactionModel.CREDIT
 
     def adjust_tx_type_for_negative_balance(self):
         if self.balance < Decimal('0.00'):
@@ -484,15 +543,6 @@ class ClosingEntryTransactionModel(ClosingEntryTransactionModelAbstract):
         abstract = False
 
 
-# noinspection PyUnusedLocal
-def closingentrymodel_presave(instance: ClosingEntryModel, **kwargs):
-    instance.create_entry_ledger(commit=False)
-
-
-pre_save.connect(closingentrymodel_presave, sender=ClosingEntryModel)
-
-
-# noinspection PyUnusedLocal
 def closingentrytransactionmodel_presave(instance: ClosingEntryTransactionModel, **kwargs):
     instance.adjust_tx_type_for_negative_balance()
 
